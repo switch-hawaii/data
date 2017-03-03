@@ -1,0 +1,49 @@
+Hawaii RTMA data are available via THREDDS, HAS, HTTP/FTP at https://www.ncdc.noaa.gov/data-access/model-data/model-datasets/national-digital-guidance-database-ndgd
+
+Also see https://www.ncdc.noaa.gov/data-access/model-data/model-datasets/national-digital-forecast-database-ndfd; their WMO Heading Reference indicates YCS... would be Hawaii wind speeds.
+
+The HAS link (http://www.ncdc.noaa.gov/has/HAS.FileAppRouter?datasetname=9950_01&subqueryby=STATION&applname=&outdest=FILE) from that page gets you to an interactive file selector, which identifies the following useful file prefixes for HI RTMA data: LNH=wind speed and direction, LPH=surface pressure, LTH=surface temperature, LHH=terrain height
+
+This is probably 10-m wind height, based on https://ams.confex.com/ams/pdfpapers/124825.pdf
+
+The TDS link (http://nomads.ncdc.noaa.gov/thredds/catalog/ndgd/catalog.html) shows the available files and can be used with opendap.
+
+I installed pydap in the anaconda installation, which may be suitable for downloading these data.
+
+Hawaii RTMA uses AWIPS Grid 196 (see http://www.nco.ncep.noaa.gov/pmb/products/rtma/). 
+
+Grid 196 documented here: http://www.nco.ncep.noaa.gov/pmb/docs/on388/tableb.html#GRID196
+The documentation is documented here (sort of): http://www.nco.ncep.noaa.gov/pmb/docs/on388/
+See especially the "Mercator Grids" section of http://www.nco.ncep.noaa.gov/pmb/docs/on388/tabled.html
+
+TODO: 
+(improve below: first download wind speed data for complete grid, hour by hour, and write incrementally into many srw files, one for each cell; then do the calculations for allowed cells; srw format is documented here: https://www.nrel.gov/analysis/sam/help/html-php/index.html?weather_format.htm
+https://www.nrel.gov/analysis/sam/help/html-php/weather_format.htm#srw; maybe omit data for leap day per https://sam.nrel.gov/content/questions-regarding-pvwattsfunc-ssc (although PVWatts seems to just skip over leap days))
+note: I may need to save data as if it were measured closer to hub height, because SAM will only scale within 35 meters
+create corresponding grid in QGIS
+identify allowed areas in each cell
+calculate average latitude and longitude of allowed areas in each cell
+calculate distance from allowed areas in each cell to interconnect (could be done in python)
+create empty wind speed array (allowed cells x hours)
+loop through years, months, days, hours:
+    retrieve complete grid of wind speed data (or just allowed cells?)
+    assign speeds to allowed cells
+store all wind speed data and/or data for allowed cells
+use SAM to calculate hourly power production in allowed area in each cell
+use k-means clustering (with extra weight on interconnect distance) to cluster cells into ~20 tranches
+save hourly profiles for each tranche (similar to rooftop solar)
+
+
+Here's some sample code with pydap:
+
+from pydap.client import open_url
+dataset = open_url('http://nomads.ncdc.noaa.gov/thredds/dodsC/ndgd/201406/20140628/LNHA98_KWBR_201406281000')
+print dataset.keys()
+data = dataset['Wind_speed'][0, 0, :, :]  # downloads the data for one grid for this time step
+print data['Wind_speed'].shape
+data['Wind_speed'][0, 0, :3, :3]   # shows the data for the first 3x3 cells
+
+# heat map of wind speeds
+%matplotlib inline
+import matplotlib.pyplot as plt
+plt.imshow(data['Wind_speed'][0, 0], cmap='cool', interpolation='nearest')

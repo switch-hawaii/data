@@ -1,0 +1,100 @@
+cc383:
+model as three separate units with three technologies:
+3x1a, 3x1b, 3x1c
+define incremental heat rate for each step for each technology
+
+separate module for '3x1' technologies:
+in each project: 
+require build for 3x1a = 3x1b = 3x1c
+require commitment of 3x1a >= 3x1b >= 3x1c
+require dispatch of 3x1a >= 3x1b >= 3x1c
+
+alternatively, could work through the permutations of the three plants and define incremental heat rates in each window; but this doesn't get start/stop fuel or n-1 measurements right.
+
+maybe:
+3x1_ct and 3x1_st
+require 
+build ct = 3 build st
+commit st <= ct
+station power = base * # ct/st units committed
+
+
+two ways to model 3x1 for reserves:
+
+1.
+model as a stack of ct and corresponding individual st
+subtract station power if any unit is activated
+constrain st output based on ct waste heat and steam heat rate curve
+don't allow st to provide more reserves than its maximum dispatch (based on commitment level of ct's)
+set st n-1 requirement equal to st maximum dispatch
+set ct n-1 requirement equal to max dispatch for (ct + portion of st)
+
+2. (seems more straightforward, but models ST less explicitly)
+model as 3 1x1 CCs (3 different techs; first includes station power and ST base reqmt)
+(model each level based on the extra fuel needed and power produced when going from 1 turbine to 2, with both running at the same output level; heat rate curve for turbine 1 should be convex and higher than heat rate curve for turbine 2, so model will decide to run turbine 2 at equal level to turbine 1 [can't go higher])
+add additional n-1 requirement equal to sum of ST portions of max dispatch
+(all station power and ST base steam kick in when first unit turns on, then it's linear; so the only operational constraint we really need is that commit 3x1a <= commit 3x1b and commit 3x1a <= commit 3x1c; after that, they all have the same incremental heat rates, so model will balance them)
+
+If _any_ #3 turbines are committed, that sets the n-1 reqmt for spinning reserves. So we have to explicitly model CT #1, #2 and #3 in some way (e.g., as separate dummy technologies). Then use big-m to set committed flag for (any) 3x1a, 3x1b or 3x1c are committed, then add up (steam part a) * 3x1a_committed_flag + (steam part b) * 3x1b_committed_flag + (steam part c) * 3x1c_committed_flag
+
+or could maybe have generic units (1x1), but add in a "station" power consumer (int), which must be >= committed_number / 3, and construct 3x1b_committed_flag as binary:  units_committed <= stations_committed + max_units * 3x1b_committed_flag, and
+units_committed <= 2 * stations_committed + max_units * 3x1c_committed_flag
+
+
+3.
+model individual turbines as 1/3 of cost of 3x1 plant, with heat rate = 0 or some arbitrary level
+add projects for 1x1, 2x1 and 3x1 CC mode (could also have CT mode if wanted); these have fuel consumption equal to the difference between fuel consumption in this mode with equal dispatch and fuel consumption of template turbine. These have $0 capital cost. Sum of commitment*size for these equals sum of commitment for individual turbines. Output equals difference between this mode and single-turbine mode.
+
+challenge: 
+dispatch can/should be equal between all turbines operating in the same multi-train mode
+- heat rates are pretty simple if we assume all turbines in same mode operate at same level
+dispatch should not be equal between turbines operating in different multi-train modes
+- this suggests using one project per mode
+but construction is in blocks of 3 turbines, not one project per mode
+start/stop should be on turbine basis (e.g., switching 2x1 to 3x1 requires starting 1 turbine, not shutting down 1 plant and starting another)
+- this suggests we commit/decommit individual turbines and link that to the modes
+reserve requirements are roughly based on CT+portion of ST
+
+option:
+indiv turbines cost 1/3 of 3x1 plant, have correct start/stop cost per turbine, no min load, 0 heat rate, forced to 0 output
+station 1x1, station 2x1, station 3x1 has correct heat rate, $0 capital cost, total commitment is pegged to indiv turbines
+- how to get n-1 contingency right for this? it's the difference between max output in current mode and max output in next mode down; also have to account for max output of ST alone
+
+maybe user just specifies the modes, with capital cost on biggest mode, then generic CC module backs out the start/stop cost and creates turbine objects to track the modes. seems pretty incorrect though.
+
+
+**********************
+best plan:
+
+add parameter to switch identifying largest contingency (MW, relative to unit size) for each project; this lets us say that a CC plant operating in 3x1 mode with 80 MW CTs and 145 MW ST (345 MW unit size) has 145 MW as max contingency
+
+for combined-cycle plants, define these technologies:
+
+plant (used to represent plant construction and overall plant commitment) - has values for capital cost, max life, fuel; 0 for heat rate, largest contingency, minimum dispatch, maximum dispatch; optional values for unit size, min up time, min down time, startup fuel (make sure this gets counted as zero for reserve purposes; maybe have a flag for certain projects that says they don't produce energy or reserves)(maybe convert DispatchUpperLimit and DispatchLowerLimit to variables, and let any module force them to be above or below some limit; then they reflect all active constraints on generation, for the purposes of computing reserves available)
+
+turbine (used to represent commitment/decommitment of individual CTs) - has values for min up time, min down time, startup fuel, fuel; has arbitrary value for unit size (maybe 1, maybe CT size); has 0 for capital cost, max dispatch, min load, heat rate, largest contingency
+
+1x1 mode, 2x1 mode, 3x1 mode (used to represent amount of capacity committed to each mode) - has values for largest contingency, heat rate curves, fuel, unit size (full plant); 0 for capital cost
+
+constraints:
+- sum of modes must equal plant capacity, plant commit and turbine commit variables.
+- calculate how many turbines must be committed and/or decommitted for the change of mode chosen at each time step, and peg turbine commit/decommit to that to get correct startup fuel and O&M; e.g., 3x1 & 0x1 -> 2x2 & 2x2 requires 2 commits and 1 decommit, not just 1 commit (define variables for changes between all available modes; require sum of these to match aggregate mode changes; require these to equal corresponding turbine transitions)
+- optionally, define separate sites for each plant, to correctly model minimum up/down time, if it's longer than an hour
+- optionally, turbine life=plant life and turbine build must equal 3x plant build
+- optionally, each mode build equals plant build
+- optionally, force plants not to be committed
+
+
+for storage (e.g., hydrogen), define these technologies:
+
+electrolyzer - 0 heat rate, 0 max dispatch, cost per MW is cost to consume
+refrigerator - 0 heat rate, 0 max dispatch, cost per MW is cost per MW or kg/h of consumption capacity
+tank - 0 heat rate, 0 max dispatch, cost per MW is treated as cost per kg
+fuel cell - 0 heat rate, has capital cost and variable O&M, standard dispatch/commit/reserve treatment
+
+hydrogen module: 
+tie parts together
+manage storage volumes
+add energy consumption by electrolyzer and refrigerator to demand components
+
+batteries: similar treatment, but just with one asset (generator), then the battery module adds charging as a load and manages the storage level and cycle count (this could be converted into a generic treatment for simple storage technologies, possibly incorporating cycling costs)

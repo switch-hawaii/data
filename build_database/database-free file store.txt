@@ -1,0 +1,20 @@
+database-free data store (?)
+
+most text files are identical to the final .tab files, but they may be sub-sampled for final output
+
+capacity factors have multiple files, one for each project and date (maybe in a capacity_factor subdir); these are aggregated based on the sub-sampling to create the final output
+
+project_info.tab needs to have data on both new and existing projects; should we make these two separate files? maybe just append them to the file in batches. we have to add different technologies in batches anyway. could store each technology in separate files instead... would have to maintain consistency in file structure, but we have to do that either way...
+
+cap factors would be about 1 GB for 2 years for 1000 projects (e.g., 60 bytes/timepoint * 2 * 8760 timepoints * 1000 projects)(zipped solar is 448 bytes per day, so 1000 projects * 448 bytes/day/project * 730 days = 327 MB)
+
+
+list of technologies in the front-end extraction script
+
+max_capacity
+
+capacity factors (intermittent projects): 
+cap_factor_projid_yyyy-mm-dd.csv - has hourly capacity factors for one project
+
+for each intermittent technology:
+

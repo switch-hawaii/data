@@ -1,0 +1,10 @@
+wind plan:
+
+re-screen for slopes, exclude golf courses and roads
+
+re-run turbine siting with looser spacing, per e-mails with HECO in July 2016 (5-8 MW per km^2)
+
+use nrel system advisor model to convert wind speeds (from OWITS with AWS sub-cell scaling factors) to power production (instead of our own power curve and derates from HECO 2013 IRP); hopefully this includes accurate conversion factors and losses
+
+aggregate based on quality and region?
+
