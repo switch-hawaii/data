@@ -4,7 +4,7 @@ Screening rules for utility-scale solar projects:
 - not golf courses
 - not within 50 meters of street centerlines (also filters out rural businesses and neighborhoods)
 - not steeper than 10% slope
-- patch is at least 60 meters wide in all directions
+- allowed patch is at least 60 meters in all directions
 
 Steps to implement these rules (eventually preparing allowed_solar.tif geotiff and solar_cluster_nsrdb_grid_final.csv text file):
 
@@ -38,23 +38,23 @@ remove all polygons smaller than 30 meters across (note: you could probably skip
     - set "No data value" to -9999
     - use Creation Options -> High Compression
     - (might be able to avoid the next clipping step by zooming to the right extent and clicking "Use intersected extent" or by adding this to the gdal_merge command: -ul_lr -158.284 21.253 -157.656 21.714 [note: y ordering is opposite from Clipper])
-    - this gives: gdal_merge.py -n -9999 -a_nodata -9999 -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9 -of GTiff -o "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/oahu_dem_merged.tif" "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/n22w158/floatn22w158_13.flt" "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/n22w159/floatn22w159_13.flt"
+    - this gives: gdal_merge.py -n -9999 -a_nodata -9999 -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9 -of GTiff -o "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem_merged.tif" "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/n22w158/floatn22w158_13.flt" "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/n22w159/floatn22w159_13.flt"
 
 - use Raster -> Extraction -> Clipper to trim the elevation raster
     - use the Oahu bounding box: -158.284 to -157.656, 21.253 to 21.714
     - use the same no data value and compression options as the Merge tool
     - edit the command to include compression options from above
-    - This gives: gdal_translate -a_nodata -9999 -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9 -projwin -158.284 21.714 -157.656 21.253 -of GTiff "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/oahu_dem_merged.tif" "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/oahu_dem_clipped.tif"
+    - This gives: gdal_translate -a_nodata -9999 -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9 -projwin -158.284 21.714 -157.656 21.253 -of GTiff "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem_merged.tif" "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem_clipped.tif"
 
 use Raster -> Raster Calculator to perform a dummy calculation on the dem raster, which will round its bounding box to 5 decimal places (in degrees). Otherwise, later operations with the Raster Calculator will do this, and the new rasters won't match the DEM.
-    output layer: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/solar data validation/ned/oahu_dem_uncompressed.tif
+    output layer: data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem_uncompressed.tif
     extent: Current layer extent (from oahu_dem_clipped): -158.28407, -157.65611, 21.25306, 21.71407, 6782 x 4979, EPSG:4269
     raster calculator expression: "oahu_dem_clipped@1"
 Note: after using the Raster Calculator, the no_data value will be -3.4028234663852886e+38 (maybe more digits?)
 
 Compress and save the oahu_dem raster with Raster -> Conversion -> Translate:
-    Input layer: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/solar data validation/ned/oahu_dem_uncompressed.tif
-    Output layer: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/solar data validation/ned/oahu_dem.tif
+    Input layer: data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem_uncompressed.tif
+    Output layer: data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem.tif
     No data: [unchecked; retains nodata value from the original raster]
     Creation Options: High Compression
     
@@ -63,7 +63,7 @@ Compress and save the oahu_dem raster with Raster -> Conversion -> Translate:
       s = 111320 * 0.5 * (1 + cos(latitude*pi/180))
     - Creation Options -> High Compression
     - this gives: 
-      gdaldem slope "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/oahu_dem.tif" "/Users/matthias/Dropbox/Research/shared/Switch-Hawaii/solar data validation/ned/oahu_slope_107447.tif" -s 107447.0 -of GTiff -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9
+      gdaldem slope "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_dem.tif" "data/Resource Assessment/GIS/Utility-Scale Solar Sites/ned/oahu_slope_107447.tif" -s 107447.0 -of GTiff -co COMPRESS=DEFLATE -co PREDICTOR=2 -co ZLEVEL=9
 
 - use Raster -> Raster Calculator to create a mask layer identifying flat areas:
     output: oahu_slope_below_10
@@ -114,7 +114,7 @@ Compress and save the oahu_dem raster with Raster -> Conversion -> Translate:
     (switches to 255 as no-data value, 1 as valid data)
 - Shift back onto original grid and filter out extra areas that got added during regrowth
     Raster -> Raster Calculator
-    output: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/switch-hawaii-studies/database/GIS/Utility-Scale Solar Sites/allowed_solar.tif
+    output: data/Resource Assessment/GIS/Utility-Scale Solar Sites/allowed_solar.tif
     extent: (take from allowed_raw)
     formula: "Expanded@1" * "allowed_raw"
     (switches to -3.40282e+38 as no-data value, keeps 1 as valid values)    
@@ -148,7 +148,7 @@ Processing -> QGIS geoalgorithms -> Vector creation tools -> create grid
     Horizontal spacing: 0.04
     Vertical spacing: 0.04
     Grid CRS: EPSG:4269 (NAD 93)   <- matches NED data
-    Grid: /Users/matthias/Dropbox/Research/shared/Switch-Hawaii/switch-hawaii-studies/database/GIS/Utility-Scale Solar Sites/nsrdb_grid.shp
+    Grid: data/Resource Assessment/GIS/Utility-Scale Solar Sites/nsrdb_grid.shp
 
 Use Field Calculator toolbar button to create columns in nsrdb_grid:
     nsrdb_lat (decimal, 7, 2) = (top + bottom)/2
@@ -159,7 +159,7 @@ Make solar_cluster_nsrdb_grid.shp:
     Vector -> Geoprocessing Tools -> Intersect...
     Input vector layer: nsrdb_grid.shp
     Intersect layer: solar_clusters.shp
-    Output shapfile: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/switch-hawaii-studies/database/GIS/Utility-Scale Solar Sites/solar_cluster_nsrdb_grid.shp
+    Output shapfile: data/Resource Assessment/GIS/Utility-Scale Solar Sites/solar_cluster_nsrdb_grid.shp
     
 Assign unique IDs for each polygon in solar_cluster_nsrdb_grid:
     Select solar_cluster_nsrdb_grid layer and click on Field Calculator on toolbar
@@ -204,5 +204,5 @@ use Processing Toolbox -> QGIS geoalgorithms -> Vector table tools -> Refactor f
     Refactored: solar_cluster_nsrdb_grid_final.shp
 right-click on layer and choose Save As...
     Format: Comma Separated Values [CSV]
-    Save as: /Users/matthias/Dropbox/Research/Shared/Switch-Hawaii/switch-hawaii-studies/database/GIS/Utility-Scale Solar Sites/solar_cluster_nsrdb_grid_final.csv
+    Save as: data/Resource Assessment/GIS/Utility-Scale Solar Sites/solar_cluster_nsrdb_grid_final.csv
     Separator: comma (default)

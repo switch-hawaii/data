@@ -1,0 +1,3 @@
+Data in this directory can be downloaded from here:
+
+https://nhts.ornl.gov/downloads > 2017 Datasets > Survey Data > CSV (63 MB)

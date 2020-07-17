@@ -35,8 +35,8 @@ lon_max = -157.60
 # with 3D buildings with peaked roofs, e.g., 21.297561, -157.817724
 # or complex roofs, e.g., 21.300070, -157.833817
 roof_colors = {
-    # gray on transparent background 
-    (242, 242, 242, 242), 
+    # gray on transparent background
+    (242, 242, 242, 242),
     # gray on colored background (e.g., military base)
     (242, 242, 242, 255),
     (240, 240, 240, 255), # multi-level roof? e.g., 21.325898, -157.849181
@@ -69,22 +69,22 @@ background_colors = {
     (0, 0, 0, 0),               # standard
     (234, 234, 234, 255),       # military bases? and residential areas
     # commercial areas (parking lots?) at zoom 17; may change to gray at zoom 18
-    (238, 230, 219, 255),       
+    (238, 230, 219, 255),
     (237, 230, 218, 255),    # 21.4998,-158.0251; 21.38907,-157.95399; 21.37907,-157.93081
-    (241, 223, 198, 255), 
+    (241, 223, 198, 255),
     (242, 224, 197, 255),
-    
+
     # road direction arrows
-    (186, 182, 190, 255), (182, 186, 202, 255), 
-    (181, 185, 201, 255), (183, 187, 203, 255), 
-    (184, 184, 192, 255), 
+    (186, 182, 190, 255), (182, 186, 202, 255),
+    (181, 185, 201, 255), (183, 187, 203, 255),
+    (184, 184, 192, 255),
     (210, 210, 218, 255), # ? is this real? where is it?
     (246, 246, 246, 28),  # partially transparent off-ramp, 21.48915, -158.02692
     (242, 242, 242, 212),  # on-road arrows at 21.3517, -157.9317 (note: this is also a standard color for roofs, but different alpha)
 }
 
 # note: some roofs are in google satellite images but missing from the map tiles:
-# 21.5034,-158.0122; 21.44511,-157.96106; 21.36900,-157.90504; 21.49678,-157.85153; 
+# 21.5034,-158.0122; 21.44511,-157.96106; 21.36900,-157.90504; 21.49678,-157.85153;
 # 21.60510,-157.90255; 21.47494,-158.21599; 21.56687,-158.11839
 
 # some roofs are bigger in the map tiles than in the satellite image (rare):
@@ -93,7 +93,8 @@ background_colors = {
 # TODO: check the white strip along edge of mosaic 21.4326168645_-158.181152344.tif
 
 # this comes from https://developers.google.com/maps/documentation/static-maps/
-google_api_key = 'AIzaSyCBXZPHx5DuELJ5plEhi2Rvtys3pGZFJLc'
+with open('google_api_key.txt') as f:
+    google_api_key = f.read().strip()
 
 zoom_level = 17         # google maps zoom level
 pixels_per_tile = 512   # size of each tile in x and y direction
@@ -133,7 +134,7 @@ for path in ['raw', 'roof_tiffs', 'orig_tiffs']:
 # yield elements in the range of (x_min, y_min) to (x_max, y_max) (inclusive)
 def iter_xy((x_min, y_min), (x_max, y_max)):
     return itertools.product(
-        xrange(int(x_min), int(x_max) + 1), 
+        xrange(int(x_min), int(x_max) + 1),
         xrange(int(y_min), int(y_max) + 1)
 )
 
@@ -151,15 +152,15 @@ def main():
         ty_max = ty_min + tiles_per_mosaic - 1
         # location of mosaic center
         m_lon, m_lat = pyproj.transform(
-            web_mercator_proj, geographic_proj, 
+            web_mercator_proj, geographic_proj,
             (mx+0.5)*meters_per_mosaic, (my+0.5)*meters_per_mosaic
         )
         # create empty mosaic
-        # In principle this could be 1-bit, but then we end up converting repeatedly to grayscale 
+        # In principle this could be 1-bit, but then we end up converting repeatedly to grayscale
         # (e.g., gdal needs a grayscale image even to make a 1-bit geotiff)
         mosaic = Image.new(mode='L', size=(pixels_per_tile * tiles_per_mosaic, pixels_per_tile * tiles_per_mosaic), color=0)
         mosaic_orig = Image.new(mode='RGBA', size=mosaic.size, color=(255, 255, 255, 0))
-    
+
         # iterate over tiles within this mosaic
         for tx, ty in iter_xy((tx_min, ty_min), (tx_max, ty_max)):
             n_done += 1
@@ -167,10 +168,10 @@ def main():
 
             # location of tile center
             t_lon, t_lat = pyproj.transform(
-                web_mercator_proj, geographic_proj, 
+                web_mercator_proj, geographic_proj,
                 (tx+0.5)*meters_per_tile, (ty+0.5)*meters_per_tile
             )
-        
+
             # define the names of files to save
             raw_file = os.path.join('raw', "{}_{}.png".format(t_lat, t_lon))
             roof_file = os.path.join('roof_tiffs', "{}_{}.tif".format(m_lat, m_lon))
@@ -178,7 +179,7 @@ def main():
             # png_file = os.path.join('pgw', "{}_{}.png".format(m_lat, m_lon))
             # pgw_file = png_file[:-4] + '.pgw'
 
-            # download tile image (with a buffer to trim from top and bottom, 
+            # download tile image (with a buffer to trim from top and bottom,
             # plus 1 extra pixel all around for the kernel later)
             # e.g., http://maps.googleapis.com/maps/api/staticmap?center=21.5092962002,-158.02734375&zoom=17&size=514x562&sensor=true&visual_refresh=true&style=feature:all|element:all|visibility:off&style=feature:landscape.man_made|element:geometry.fill|visibility:on
             if not os.path.exists(raw_file):
@@ -189,9 +190,9 @@ def main():
                     + "&style=feature:landscape.man_made|element:geometry.fill|visibility:on"
                     + "&key={key}"
                 ).format(
-                    lat=t_lat, lon=t_lon, 
-                    w=pixels_per_tile+2*edge_buffer, 
-                    h=pixels_per_tile+2*edge_buffer+2*bottom_buffer, 
+                    lat=t_lat, lon=t_lon,
+                    w=pixels_per_tile+2*edge_buffer,
+                    h=pixels_per_tile+2*edge_buffer+2*bottom_buffer,
                     key=google_api_key
                 )
                 urllib.urlretrieve(query, raw_file)
@@ -209,18 +210,18 @@ def main():
             im_data = im.load()
             for x in xrange(im.size[0]):
                 for y in xrange(im.size[1]):
-                    # There's a short list of real background colors, which usually come through 
+                    # There's a short list of real background colors, which usually come through
                     # consistently because they are 100% opaque and big enough to dominate the palette.
                     # But then there are also lots of different colors for arrows. Unlike roofs, these
                     # all have red or alpha values <= 215.
                     # (If this doesn't catch them all, another option would be to change remove_small_parts()
-                    # to remove everything smaller than 4 pixels across (about 5 meters), which should 
+                    # to remove everything smaller than 4 pixels across (about 5 meters), which should
                     # remove all the arrows without sacrificing usable roofs. Or the images could be downloaded
-                    # with zoom level 18, which makes the roofs twice as big but not the arrows. The maps 
+                    # with zoom level 18, which makes the roofs twice as big but not the arrows. The maps
                     # could be kept at that resolution or the images could be downsampled to the next level up.)
                     r, g, b, a = im_data[x, y]
                     if (
-                        (r, g, b, a) in background_colors 
+                        (r, g, b, a) in background_colors
                         or (r <= 215 or a <= 215)  # covers most road arrows
                         # the next two distinguish orange-tinted commercial areas from similarly colored buildings
                         or (r <= 245 and g <= 230)
@@ -229,7 +230,7 @@ def main():
                         pass    # it's a background color
                     else:
                         bw_data[x, y] = 255
-        
+
             # # use a kernel and threshold to filter out stray pixels (e.g., anti-aliasing along the edge of military bases)
             # # a pixel will be white if it is currently white and has at least 3 other white pixels around it (kernel >= 1.3)
             # # or if it is black but has at least 6 white pixels around it (0.6 <= kernel <= 0.8)
@@ -263,11 +264,11 @@ def main():
         save_geotiff(mosaic_orig, orig_file, mx, my)
 
 srs = osr.SpatialReference()
-# next two lines don't work because gdal package also needs to have 
+# next two lines don't work because gdal package also needs to have
 # GDAL_DATA enviro variable pointing to a directory with EPSG support file gcs.csv
-# (which may come with conda libgdal package, see https://github.com/ContinuumIO/anaconda-issues/issues/221, 
+# (which may come with conda libgdal package, see https://github.com/ContinuumIO/anaconda-issues/issues/221,
 # but that requires an earlier version of xc, which previously caused problems with gdal itself)
-# It may be possible to fix this by pointing GDAL_DATA to 
+# It may be possible to fix this by pointing GDAL_DATA to
 # ~/anaconda/share/epsg_csv/ or ~/anaconda/share/gdal/
 # (and then gdal could also be used to do the projection calculations, eliminating need for pyproj)
 # srs.ImportFromEPSG(3857)         # Web Mercator
@@ -277,7 +278,7 @@ web_mercator_wkt = """PROJCS["WGS 84 / Pseudo-Mercator",GEOGCS["Popular Visualis
 geotiff_driver = gdal.GetDriverByName('GTiff')
 
 def remove_small_parts(image, background=False):
-    """Remove areas of img that are smaller than 2 pixels across. 
+    """Remove areas of img that are smaller than 2 pixels across.
     img should be grayscale, with values of only 0 (background) and 255 (foreground).
     If background=True, this will remove small background regions instead of foreground."""
     grow_filter_1 = ImageFilter.Kernel((3,3), [1.0]*9, scale=1.0)
@@ -307,7 +308,7 @@ def remove_small_parts(image, background=False):
 def save_geotiff(mosaic, tif_file, mx, my, one_bit=False):
     # mosaic should be 1-bit or have 8 bits per band
     # if it's grayscale and one_bit is True, it will be saved as a one-bit image
-    
+
     if mosaic.mode == '1':
         # perversely, WriteArray() doesn't work with a (boolean) array made from a 1-bit image
         mosaic = mosaic.convert('L')
@@ -319,7 +320,7 @@ def save_geotiff(mosaic, tif_file, mx, my, one_bit=False):
         options = ['NBITS=1', 'COMPRESS=CCITTFAX4']   # gives the best compression by a factor of 2
     else:
         options = ['COMPRESS=DEFLATE']
-        
+
     # split into separate bands, so we know how many to create and can write each one individually
     bands = mosaic.split()
 
@@ -349,7 +350,7 @@ def save_geotiff(mosaic, tif_file, mx, my, one_bit=False):
         -meters_per_pixel
     )
 
-    dataset.SetGeoTransform(geotransform)  
+    dataset.SetGeoTransform(geotransform)
     dataset.SetProjection(web_mercator_wkt)
     for i, band in enumerate(bands):
         dataset.GetRasterBand(i+1).WriteArray(np.asarray(band))

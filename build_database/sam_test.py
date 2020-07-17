@@ -1,3 +1,4 @@
+from __future__ import print_function
 from sscapi import *
 
 def setup_pv(ssc, data):
@@ -15,21 +16,21 @@ def run_pvwattsv5( ssc, data ):
 	mod = ssc.module_create("pvwattsv5")	
 	ssc.module_exec_set_print( 0 );
 	if ssc.module_exec(mod, data) == 0:
-		print 'PVWatts V5 simulation error'
+		print('PVWatts V5 simulation error')
 		idx = 1
 		msg = ssc.module_log(mod, 0)
 		while (msg != None):
-			print '\t: ' + msg
+			print('\t: ' + msg)
 			msg = ssc.module_log(mod, idx)
 			idx = idx + 1
 	else:
 		ann = ssc.data_get_number(data, "ac_annual")
-		print 'PVWatts V5 Simulation ok, e_net (annual kW)=', ann
+		print('PVWatts V5 Simulation ok, e_net (annual kW)=', ann)
 	ssc.module_free(mod)
 
 wf = '/Users/Matthias/SAM Downloaded Weather Files/lat21.55620_lon-158.03720_2007.csv';
 
-print wf
+print(wf)
 
 ssc = PySSC()
 dat = ssc.data_create()
