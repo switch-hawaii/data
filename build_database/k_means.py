@@ -76,39 +76,45 @@ class KMeans(object):
             while len(self.mu) < self.K:
                 self._choose_next_center()
 
-    def _cluster_points(self):
-        self.clusters = defaultdict(list)
-        best_mu_idx = self._squared_distances().argmin(axis=1)
-        for i, x in enumerate(self.X):
-            self.clusters[best_mu_idx[i]].append(x)
-        self.cluster_id = best_mu_idx   # save cluster identifiers for plotting
+    # def _cluster_points(self):
+    #     # self.clusters has one entry per cluster, which is a list of vectors
+    #     # included in that cluster (the vectors themselves, not their IDs)
+    #     self.clusters = defaultdict(list)
+    #     best_mu_idx = self._squared_distances().argmin(axis=1)
+    #     for i, x in enumerate(self.X):
+    #         self.clusters[best_mu_idx[i]].append(x)
+    #     self.cluster_id = best_mu_idx   # save cluster identifiers for plotting
+    #
+    # def _reevaluate_centers(self):
+    #     for i in range(len(self.mu)):
+    #         # self.clusters[i] is a list of rows of X that are in cluster i;
+    #         # numpy calculates the mean across these rows as if this were an array
+    #         self.mu[i] = np.mean(self.clusters[i], axis=0)
 
-    def _reevaluate_centers(self):
-        for i in range(len(self.mu)):
-            self.mu[i] = np.mean(self.clusters[i], axis=0)
-
-    def _group_mean(a, groups, n_groups, weights):
+    def _group_mean(self, col):
+        """
+        col = self.X[:, 12]
+        """
         return (
-            np.bincount(groups, weights=a*weights, minlength=n_groups)
-            / np.bincount(groups, weights=weights, minlength=n_groups)
+            np.bincount(self.cluster_id, weights=col*self.size, minlength=self.K)
+            / np.bincount(self.cluster_id, weights=self.size, minlength=self.K)
         )
 
     def calculate_clusters(self):
         # find the id of the nearest cluster (0 to K-1) for each entry in X
         self.cluster_id = self._squared_distances().argmin(axis=1)
         # get weighted mean values of the X's that correspond to each cluster id
-        self.mu[i] = np.apply_along_axis(
-            self._group_mean, axis=1, arr=self.X,
-            groups=self.cluster_id, n_groups=self.K, weights=self.size
-        )
+        self.mu = np.apply_along_axis(self._group_mean, axis=0, arr=self.X)
 
     def find_centers(self):
         while True:
             oldmu = np.copy(self.mu)
-            # Assign all points in X to clusters
-            self._cluster_points()
-            # Reevaluate centers
-            self._reevaluate_centers()
+            # # Assign all points in X to clusters
+            # self._cluster_points()
+            # # Reevaluate centers
+            # self._reevaluate_centers()
+            # Reassign points in X to clusters and recalculate centers
+            self.calculate_clusters()
             # check for convergence
             if np.array_equal(oldmu, self.mu):
                 break
@@ -134,3 +140,15 @@ class KMeans(object):
         ax.set_xlim(min(self.X[:,0]), max(self.X[:,0]))
         ax.set_ylim(min(self.X[:,1]), max(self.X[:,1]))
         # canvas.draw()   # may not be needed? see http://stackoverflow.com/questions/26783843/redrawing-a-plot-in-ipython-matplotlib
+
+"""
+Testing:
+
+cell_capacities = np.load('cell_capacities.npy')
+cell_cap_factors = np.load('cell_cap_factors.npy')
+n_clusters = 4
+self = KMeans(n_clusters, X=cell_cap_factors, size=cell_capacities)
+self.init_centers()
+self.find_centers()
+
+"""

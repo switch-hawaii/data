@@ -37,24 +37,20 @@ data_directory = '..'
 #     data_directory, 'Generator Info', 'PSIP 2016-12 ATB 2018 Bloomberg generator data.xlsx'
 # )
 technology_data_file = os.path.join(
-    data_directory, 'Generator Info', 'PSIP 2016-12 ATB 2019 generator data.xlsx'
+    data_directory, 'Generator Info', 'PSIP 2016-12 ATB 2020 generator data.xlsx'
 )
 # definitions to use for a flat-costs scenario
 # (should we define this scenario in the xlsx file itself?)
-flat_base_scenario = 'ATB_2019_mid'
-flat_scenario = 'ATB_2019_flat'
-flat_ref_year = 2019
-# load scenario ID corresponding to this file
-load_scenario = 'PSIP_2016_12'
+flat_base_scenario = 'ATB_2020_mid'
+flat_scenario = 'ATB_2020_flat'
+flat_ref_year = 2020
 
 ferc714_load_file = os.path.join(
-    data_directory,
-    'FERC Form 714 Database',
+    data_directory, 'Loads', 'FERC Form 714 Database',
     'Part 3 Schedule 2 - Planning Area Hourly Demand.csv'
 )
 ferc714_respondent_file = os.path.join(
-    data_directory,
-    'FERC Form 714 Database',
+    data_directory, 'Loads', 'FERC Form 714 Database',
     'Part 1 Schedule 1 - Identification Certification.csv'
 )
 
@@ -77,7 +73,6 @@ def main():
     fuel_costs()
     # fuel_costs_no_biofuel()  # obsolete
     energy_sources()
-    loads()
     interconnects()
 
     # renewable energy functions create the project and capacity factor tables
@@ -100,6 +95,7 @@ def main():
     solar_resources.distributed_pv()
     onshore_wind()
     offshore_wind()
+
     # generator info functions create or recreate tables with descriptions of all
     # renewable and fossil technologies (generator_info,
     # gen_build_costs, etc.). They also add records for fossil projects
@@ -107,9 +103,19 @@ def main():
     # This can be re-run without re-running the renewable functions, because
     # it deletes all non-renewable records from the projects table and leaves
     # the renewable records.
+
+    # TODO: estimate costs for existing projects (including new-buildable) in
+    # Existing Plant Data.xlsx and then create single records for these with
+    # tech_scenario = "all" or "existing" in generator_info and gen_build_costs
+    # Then don't create records for these when doing new generators. And
+    # reference the correct tech_scenario when retrieving DER production in loads().
     generator_info()
+
     # add interconnect costs to projects table; these aren't calculated earlier
     calculate_interconnect_costs()
+
+    # depends on production estimates from existing PV
+    loads()
 
     # various timeseries
     shared_tables.create_table('periods')
@@ -870,7 +876,8 @@ def make_short_slice_timeseries(days_per_sample, period_years, period_lengths, t
     )
 
 
-# filter to select dates with valid data; used for k-means and nearest-cdf sampling
+# filter to select dates with valid data in the reference period we normally use;
+# used for k-means and nearest-cdf sampling.
 # we omit these dates (HST):
 # 2008-02-29: no solar data available
 # 2008-12-27: blackout (can't be modeled)
@@ -887,7 +894,7 @@ def get_hourly_resource_vectors():
     """
     Return numpy array showing vectors of hourly values for
     'CentralTrackingPV', 'SlopedDistPV', 'OnshoreWind' and load, for each
-    historical day for which we have data (most of 2007-2008). These are
+    historical day for which we will use data (most of 2007-2008). These are
     used for k-means clustering.
     """
     # get dataframe with date index, hourly values for mean wind, mean solar, load
@@ -901,16 +908,16 @@ def get_hourly_resource_vectors():
         select
             date_time, technology as label,
             sum(gen_capacity_limit_mw*cap_factor)/sum(gen_capacity_limit_mw) as level
-        FROM projects join variable_capacity_factors using (project_id)
-        where technology in ('CentralTrackingPV', 'SlopedDistPV', 'OnshoreWind')
-            and {date_filter}
-        group by 1, 2
-        union
-        select
+        FROM projects JOIN variable_capacity_factors USING (project_id)
+        WHERE technology IN ('CentralTrackingPV', 'SlopedDistPV', 'OnshoreWind')
+            AND {date_filter}
+        GROUP BY 1, 2
+        UNION
+        SELECT
             -- note: max load in this date range is 1248.9
-            date_time, 'SystemLoad' as label, system_load/1250.0 as level
-        from loads
-        where {date_filter}
+            date_time, 'SystemLoad' as label, system_load/1250.0 AS level
+        FROM loads
+        WHERE {date_filter}
         ;
     """.format(date_filter=sql_date_filter)
     hourly_data = pd.read_sql(hourly_query, con=db_engine)
@@ -3165,8 +3172,17 @@ def existing_generator_info():
     # and tracking_pv code define renewable projects (all based on the technology_data_file).
     projects = data_frame_from_xlsx(gen_info_file, 'technology_info').T.set_index(0).T
 
+    # if projects['existing_mwh'].notnull().any():
+    #     raise ValueError(
+    #         'Projects with values for existing_mwh cannot be defined as one-off '
+    #         'technologies in {} (technology_info range). They must use standard '
+    #         'technologies defined for new projects.'
+    #         .format(gen_info_file)
+    #     )
+    # This should be OK with new code that passes through proj_overnight_cost_per_kwh
+
     # create columns not provided in xlsx file
-    projects['gen_capacity_limit_mw'] = projects['proj_existing_cap']
+    projects['gen_capacity_limit_mw'] = projects['existing_mw']
 
     # set index and choose correct columns for database
     projects = projects.set_index(['load_zone', 'technology', 'site', 'orientation'])
@@ -3247,9 +3263,9 @@ def existing_generator_info():
             proj_build_dist_pv.drop(['site', 'orientation'], axis=1) \
             .merge(dist_pv_tranches, on=['load_zone', 'technology'], how='left')
         )
-        # allocate existing capacity among tranches
-        new_rows['proj_existing_cap'] = (
-            new_rows['proj_existing_cap'] * new_rows['site_capacity'] / new_rows['zone_good_capacity']
+        # allocate existing dist PV capacity among tranches
+        new_rows['existing_mw'] = (
+            new_rows['existing_mw'] * new_rows['site_capacity'] / new_rows['zone_good_capacity']
         )
         # append matching columns to proj_build
         proj_build = proj_build.append(new_rows.reindex(columns=proj_build.columns))
@@ -3259,25 +3275,43 @@ def existing_generator_info():
         'SELECT project_id, load_zone, technology, site, orientation FROM projects;',
         con=db_engine
     )
-    proj_build = proj_build.merge(proj_id, how='left')
+    """
+    proj_id.query('technology=="DistBattery"')
+    proj_id.query('technology=="SlopedDistPV"')
+    proj_build.query('technology=="DistBattery"')
+    proj_build.query('technology=="SlopedDistPV"')
+    """
+    proj_build = proj_build.merge(
+        proj_id, how='left',
+        on=['load_zone', 'technology', 'site', 'orientation']
+    )
     proj_unmatched = proj_build[proj_build['project_id'].isnull()]
     if proj_unmatched.shape[0] > 0:
-        print("="*70)
-        print("WARNING: The following existing projects were not found in the project table:")
-        print(proj_unmatched)
-        print('See "{}" for details.'.format(gen_info_file))
-        print("="*70)
+        raise ValueError(
+            "\n"
+            + "="*70
+            + "\nThe following existing projects were not found in the project table:\n"
+            + str(proj_unmatched)
+            + '\nSee "{}" for details.\n'.format(gen_info_file)
+            + "="*70
+        )
 
     # create/replace gen_build_predetermined table (with appropriate formats for columns)
     proj_build['build_year'] = proj_build['build_year'].astype(int)
     proj_build = proj_build.set_index(['project_id', 'build_year'])
-    proj_build = proj_build[['proj_existing_cap', 'proj_overnight_cost', 'proj_fixed_om']].astype(float)
+    proj_build = proj_build[[
+        'existing_mw', 'existing_mwh',
+        'proj_overnight_cost', 'proj_overnight_cost_per_kwh',
+        'proj_fixed_om'
+    ]].astype(float)
     proj_build['base_year'] = get_named_cell_from_xlsx(gen_info_file, named_range='base_year')
 
     # rename columns for database (TODO: push this back to the Excel workbook)
     proj_build = proj_build.rename(columns={
-        'proj_existing_cap': 'gen_predetermined_cap',
+        'existing_mw': 'gen_predetermined_cap',
+        'existing_mwh': 'gen_predetermined_storage_energy_mwh',
         'proj_overnight_cost': 'capital_cost_per_kw',
+        'proj_overnight_cost_per_kwh': 'capital_cost_per_kwh',
         'proj_fixed_om': 'fixed_o_m'
     })
 
@@ -3300,21 +3334,50 @@ def existing_generator_info():
         con=db_engine
     ).set_index('project_id')
     if excess_allocation.shape[0] > 0:
-        print("="*70)
-        print("WARNING: The following projects have installations greater than")
-        print("the maximum possible capacity:")
-        print(excess_allocation)
-        print('See "{}" for details.'.format(gen_info_file))
-        print("="*70)
+        raise ValueError(
+            "\n"
+            + "="*70
+            + "\nThe following existing projects have installations greater than\n"
+            + "the maximum possible capacity:\n"
+            + str(excess_allocation)
+            + '\nSee "{}" for details.\n'.format(gen_info_file)
+            + "="*70
+        )
 
 
 def loads():
     # TODO: extend to other load zones by adding more rows to the
     # 'sales_forecast' region of the technology_data_file
 
-    # TODO: add PV production based on historical weather to FERC loads
-    # to get gross loads (before applying PV)
+    historical_loads()
 
+    execute("""
+        DROP TABLE IF EXISTS load_scale;
+        CREATE TABLE load_scale (
+            load_zone varchar(20) NOT NULL,
+            load_scenario varchar(30) NOT NULL,
+            year_hist int NOT NULL,
+            year_fore int NOT NULL,
+            peak_hist double precision,
+            peak_fore double precision,
+            avg_hist double precision,
+            avg_fore double precision,
+            scale double precision,
+            "offset" double precision
+        );
+    """)
+
+    igp_2020_load_forecast()
+    psip_load_forecasts()
+    flat_2007_load_forecast()
+
+    # Ensure uniqueness and possibly help with queries
+    execute("""
+        ALTER TABLE load_scale
+        ADD PRIMARY KEY (load_zone, year_hist, load_scenario, year_fore);
+    """)
+
+def historical_loads():
     ferc_respondents = pd.read_csv(ferc714_respondent_file, encoding='latin1')
     heco_respondent_id = ferc_respondents.loc[
         ferc_respondents['plan_area_name'].str.startswith("Hawaiian Electric Company"),
@@ -3343,34 +3406,321 @@ def loads():
     ferc = ferc.set_index('day_start').loc[:, 'hour01':'hour25']
     ferc.columns = range(25)  # switch to zero-indexed int hours
     ferc.columns.name = 'hour'
-    ferc = ferc.stack().to_frame(name='system_load').reset_index()
+    ferc = ferc.stack().to_frame(name='net_load').reset_index()
     ferc['date_time'] = ferc['day_start'] + ferc['hour'] * pd.Timedelta(hours=1)
     ferc['load_zone'] = 'Oahu'
     # For Hawaii, we can just drop hour 25, because it is never used.
     # For other regions, we would need to investigate how the file handled
     # daylight saving time (one missing hour at start, extra hour at end)
-    ferc = ferc.loc[ferc['hour'] < 24, ['load_zone', 'date_time', 'system_load']]
+    ferc = ferc.loc[ferc['hour'] < 24, ['load_zone', 'date_time', 'net_load']]
 
-    # ferc.to_sql('loads', con=db_engine, index=False, if_exists='replace')
-    # line above takes 10+ mins so we do a bulk copy (takes about 5 sec):
-    ferc.loc[[], :].to_sql('loads', con=db_engine, index=False, if_exists='replace')
+    tz = ferc['date_time'].dt.tz
+
+    load = ferc
+
+    der = get_historical_der_production(tz)
+    load = load.merge(der, on=['load_zone', 'date_time'], how='left')
+    load['der_prod'] = load['der_prod'].fillna(0.0)
+
+    ev_load = get_historical_ev_loads(tz)
+    load = load.merge(ev_load, on=['load_zone', 'date_time'], how='left')
+    load['ev_load'] = load['ev_load'].fillna(0.0)
+
+    # non-DER, non-ev load used for Switch; could be renamed in the future
+    load['system_load'] = load['net_load'] + load['der_prod'] - load['ev_load']
+
+    # for col, func in [('der_prod', get_historical_der_production), ('ev_load', get_historical_ev_loads)]:
+    #     df = func(tz)
+    #     load = load.merge(df, on=['load_zone', 'date_time'], how='left')
+    #     load[col] = load[col].fillna(0.0)
+
+    # bulk copy to database (~100x faster than to_sql)
+    # first (re-)create the empty table:
+    load.loc[[], :].to_sql(
+        'loads', con=db_engine, index=False, if_exists='replace'
+    )
     # convert time to string to force use of correct time zone
-    ferc['date_time'] = ferc['date_time'].dt.strftime("%Y-%m-%d %H:%M:%S%z")
-    copy_dataframe_to_table(ferc, 'loads')
+    load['date_time'] = load['date_time'].dt.strftime("%Y-%m-%d %H:%M:%S%z")
+    copy_dataframe_to_table(load, 'loads')
     # Ensure uniqueness and possibly help with queries
     execute("ALTER TABLE loads ADD PRIMARY KEY (load_zone, date_time);")
+
+
+def get_historical_der_production(tz):
+    print(
+        "Retrieving distributed PV production to calculate underlying "
+        "historical loads from FERC data. Takes ~1 min."
+    )
+    der = pd.read_sql(
+        sql="""
+            SELECT
+                p.load_zone,
+                cf.date_time,
+                SUM(b.gen_predetermined_cap*cf.cap_factor) as der_prod
+            FROM generator_info t
+                JOIN projects p USING (technology)
+                JOIN gen_build_predetermined b USING (project_id)  -- multi-match
+                JOIN variable_capacity_factors cf USING (project_id)
+            WHERE t.technology in ('FlatDistPV', 'SlopedDistPV', 'DistPV')
+                AND tech_scenario = (
+                    SELECT MAX(tech_scenario)
+                    FROM generator_info
+                    WHERE technology in ('DistPV', 'SlopedDistPV')
+                    AND tech_scenario like ('ATB_%%_mid')
+                )
+                AND EXTRACT(year FROM cf.date_time) >= b.build_year
+                AND EXTRACT(year FROM cf.date_time) < b.build_year + t.gen_max_age
+            GROUP BY 1, 2
+            ORDER BY 1, 2;
+        """,
+        con=db_engine
+    )
+
+    if len(der) == 0:
+        raise ValueError(
+            "Couldn't find data on existing distributed PV to calculate "
+            "underlying historical loads from FERC data. Check whether there "
+            "are *DistPV projects in the database for tech scenario ATB_*_mid."
+        )
+
+    # date-time is given in UTC for some reason, so we convert to match FERC (HST)
+    der['date_time'] = der['date_time'].dt.tz_convert(tz)
+    return der
+
+def get_historical_ev_loads(tz):
+    # For now we just use the same year of data every year, which is good enough for
+    # calculating peak and average nominal load to calibrate HECO's forecast.
+    # This doesn't affect the nominal load shapes we use for modeling, which
+    # are based on 2007-2008, before there was EV load.
+    # TODO: if shifting base year to sometime after ~2020, align EV day-of-week
+    # with reference day-of-week. This can be done as follows:
+    # 1. Store copies of holiday profiles from 2030 year (New Years,
+    #    President's Day, Easter, Memorial Day, Independence Day, Labor Day,
+    #    Christmas)
+    # 2. Replace holiday profiles with average of previous/next day that is the
+    #    same day of the week. This creates a reference version of 2030.
+    # 3. Create a vector that has the 4 last days of 2030, followed by all of
+    #    2030, followed by first 4 days of 2030. Take note of which day-of-week
+    #    this starts on.
+    # 4. Create a dataframe to hold all-years, all-hours data.
+    # 5. For each year, stamp in a slice of data from the reference vector, with
+    #    first day-of-week aligned to first day of year. Then stamp in holiday
+    #    profiles from 2030.
+    # 6. Rescale each year to match reported total GWh for that year.
+    # 7. Return the resulting vector. This can also be used for EV BAU loads if
+    #    desired (possibly rescaled to deviate from HECO magnitude).
+    print(
+        "Using 2030 EV loads on same calendar day in other years. In the "
+        "future, these should be aligned to weekdays with holidays trued up, "
+        "as discussed in get_historical_ev_loads()."
+    )
+
+    # best estimate of historical EV load shape
+    ev_load_shape = pd.read_excel(
+        data_dir('EV Adoption', 'EoT Roadmap Nonmanaged Charging in 2030.xlsx'),
+        sheet_name='Oahu Residential',
+        usecols='D'
+    )
+    # convert to % of annual total
+    ev_load_shape = ev_load_shape / ev_load_shape.sum()
+    # ev_load_shape doesn't include leap day, so we have to index by
+    ev_load_shape.index = pd.date_range(
+        start=datetime.datetime(2030, 1, 1, 0, 0, 0),
+        end=datetime.datetime(2030, 12, 31, 23, 59, 59),
+        freq='1H'
+    )
+
+    # best estimate of historical EV load (total for year)
+    ev_annual_mwh = pd.read_excel(
+        data_dir('Loads', 'oahu_IGP_forecast_by_layer.xlsx'), 'Slide 18 by layers',
+        header=2, usecols='A:H', index_col=0,
+    )['EV'].fillna(0.0) * 1000
+    ev_annual_mwh.index = ev_annual_mwh.index.astype(str)
+    ev_annual_mwh = ev_annual_mwh['2006':'2050']
+    ev_annual_mwh.index = ev_annual_mwh.index.astype(int)
+
+    # create hourly loads for all years
+    ev_load = pd.DataFrame(
+        # use numpy broadcasting to multiply hourly shapes by annual loads
+        ev_load_shape.values * ev_annual_mwh.values[np.newaxis, :],
+        index=ev_load_shape.index,
+        columns=ev_annual_mwh.index
+    ).stack() # unstack to a single list
+    # combine year and date/hour indexes to get a date_time (can't just add n
+    # years because Python and Pandas don't seem to allow for n-year offsets)
+    dt = ev_load.index.get_level_values(0)
+    ev_load.index = pd.to_datetime(pd.DataFrame({
+        'year': ev_load.index.get_level_values(1),
+        'month': dt.month,
+        'day': dt.day,
+        'hour': dt.hour,
+    }))
+    ev_load.index = ev_load.index.tz_localize(tz)
+
+    # fill in missing data with average of surrounding week
+    # (should only be leap days)
+    all_hours = pd.date_range(
+        start=ev_load.index[0], end=ev_load.index[-1], freq='1H',
+    )
+    fill_hours = all_hours.difference(ev_load.index)
+    fill_mean = pd.DataFrame(
+        {
+            str(o): ev_load[fill_hours + datetime.timedelta(days=o)].values
+            for o in [-3, -2, -1, 1, 2, 3]
+        },
+        index=fill_hours
+    ).mean(axis=1)
+    ev_load = ev_load.append(fill_mean).sort_index()
+    ev_load.index.name = 'date_time'
+
+    ev_load = pd.DataFrame({'load_zone': 'Oahu', 'ev_load': ev_load}).reset_index()
+    ev_load = ev_load.reindex(columns=['load_zone', 'date_time', 'ev_load'])
+
+    return ev_load
+
+
+def igp_2020_load_forecast():
+    """ Create forecast based on 2020 IGP docket, calibrated to match FERC filings"""
+
+    # from https://www.hawaiianelectric.com/documents/clean_energy_hawaii/integrated_grid_planning/stakeholder_engagement/working_groups/forecast_assumptions/oahu_IGP_forecast_by_layer.xlsx
+    # via March 9, 2020 section of https://www.hawaiianelectric.com/clean-energy-hawaii/integrated-grid-planning/stakeholder-engagement/working-groups/forecast-assumptions-documents
+
+    igp_forecast_file = data_dir('Loads', 'oahu_IGP_forecast_by_layer.xlsx')
+    load_scenario = 'IGP_2020_03'
+
+    # get historical peak and average loads; HECO seems to use evening peak in
+    # underlying forecast as their "peak", because DER has minimal effect on it
+    # (peak in net_load + der_prod actually occurs during day, so DER has a
+    # big effect)
+    # see select extract(year from date_time) as year, max(system_load) as all_hours_peak, max(case when extract(hour from date_time) between 18 and 22 then system_load else 0 end) as evening_peak from loads group by 1;
+    # note that all-hours peak used to be close to evening peak, but since 2014,
+    # all-hours peak has risen a lot (with addition of DER) while evening peak
+    # has held pretty steady. This may be fictitious, but it seems likely to be
+    # true, since all the installed DER must be delivering power during the day;
+    # it's not likely we differ from HECO by 180 MW in production from 533 MW
+    # of DER installed by 2019 (especially since DER GWh are close).
+    # NOTE: system_load is defined as underlying forecast - EE = net_load + DER - EV
+    hist = pd.read_sql(
+        sql="""
+            SELECT
+                load_zone,
+                EXTRACT(year FROM date_time)::int as year_hist,
+                MAX(
+                    CASE
+                        WHEN EXTRACT(hour FROM date_time) BETWEEN 18 and 22
+                            THEN system_load
+                        ELSE 0
+                    END
+                ) as peak_hist,
+                AVG(system_load) as avg_hist
+            FROM loads
+            GROUP BY 1, 2;
+        """,
+        con=db_engine
+    )
+
+
+    # forecasted energy
+    gwh = pd.read_excel(
+        igp_forecast_file, 'Slide 18 by layers',
+        header=2, usecols='A:H', index_col=0,
+    )
+    gwh.index = gwh.index.astype(str)
+    gwh = gwh.loc['2006':'2050', :]
+    gwh.index = gwh.index.astype(int)
+    gwh['hours_in_year'] = 8760 + 24 * (gwh.index.to_series().mod(4) == 0).astype(int)
+
+    mw = pd.read_excel(
+        igp_forecast_file, 'Slide 19 by layers',
+        header=2, usecols='A:I', index_col=0,
+    )
+    mw.index = mw.index.astype(str)
+    mw = mw.loc['2006':'2050', :]
+    mw.index = mw.index.astype(int)
+
+    # forecast, uncalibrated
+    fore = pd.DataFrame(index=gwh.index.union(mw.index))
+    fore['load_zone'] = 'Oahu'
+    fore['avg_fore'] = 1000 * (gwh['Underlying *'] + gwh['EE']) / gwh['hours_in_year']
+    fore['peak_fore'] = mw['Underlying *'] + mw['EE']
+
+    # adjust HECO forecast (customer-side) so it matches FERC reporting
+    # (generator-side) in previous years
+    calib = hist.merge(
+        fore.reset_index(),
+        left_on=['load_zone', 'year_hist'],
+        right_on=['load_zone', 'Year'],
+        how='inner'
+    ).groupby('load_zone').mean()
+    # find scale factors that will adjust HECO's customer-based loads
+    # to match the system-based loads (including losses [and unsold power?])
+    # reported to FERC
+    peak_scale = calib['peak_hist'].mean()/calib['peak_fore'].mean()
+    avg_scale = calib['avg_hist'].mean()/calib['avg_fore'].mean()
+
+    fore = fore.reset_index().rename(columns={'Year': 'year_fore'}).set_index('load_zone')
+
+    # 'hist' is FERC based (supply-side) and 'fore' is HECO's back-cast (customer-side)
+    avg_calib = calib['avg_hist']/calib['avg_fore']  # +7.1%
+    peak_calib = calib['peak_hist']/calib['peak_fore']  # +2.8%
+    print("Calibration factors to true up HECO forecast to match FERC reporting:")
+    print("average load:")
+    print(avg_calib)
+    print("peak load:")
+    print(peak_calib)
+    # This rescaling is right if we are just accounting for losses, but then we
+    # should rescale the EV loads and DER production to adjust for this too, or
+    # else incorporate losses directly.
+    # But since average load is off by less than peak, it seems more likely that
+    # this includes some unbilled power production (street lights?). So then we
+    # should just rescale the underlying forecast for times when that occurs.
+    # But we don't know when those are.
+    fore.loc[:, 'avg_fore'] *= avg_calib
+    fore.loc[:, 'peak_fore'] *= peak_calib
+
+    # calculate scale and offset for each year
+    sls = pd.merge(hist, fore, on='load_zone') # cross-join years
+    sls['load_scenario'] = load_scenario
+    sls['scale'] = (sls['peak_fore'] - sls['avg_fore']) / (sls['peak_hist'] - sls['avg_hist'])
+    sls['offset'] = sls['peak_fore'] - sls['scale'] * sls['peak_hist']
+    # these should be close to 1 scale and 0 offset: sls.query('year_hist == year_fore')
+
+    # put into standard order, drop unneeded columns, convert to the right types for the database
+    db_columns = [
+        'load_zone', 'load_scenario', 'year_hist', 'year_fore',
+        'peak_hist', 'peak_fore', 'avg_hist', 'avg_fore', 'scale', 'offset'
+    ]
+    system_load_scale = pd.DataFrame()
+    for c in db_columns:
+        if c in ['load_zone', 'load_scenario']:
+            system_load_scale[c] = sls[c].astype(str)
+        elif c in ['year_hist', 'year_fore']:
+            system_load_scale[c] = sls[c].astype(int)
+        else:
+            system_load_scale[c] = sls[c].astype(float)
+    system_load_scale.set_index(db_columns[:4], inplace=True)
+    # check projections based on 2008:
+    # system_load_scale.loc[('Oahu', slice(None), 2008, slice(None)), :]
+    # store data
+    system_load_scale.to_sql('load_scale', db_engine, if_exists='append')
+
+def psip_load_forecasts():
+    """ Create raw and calibrated forecasts based on 2016 PSIP (obsolete)"""
+
+    load_scenario = 'PSIP_2016_12'
 
     # get historical peak and average loads
     hist = pd.read_sql(
         sql="""
             SELECT
-                load_zone, EXTRACT(year FROM date_time) as year_hist,
+                load_zone, EXTRACT(year FROM date_time)::int as year_hist,
                 MAX(system_load) as peak_hist, AVG(system_load) as avg_hist
             FROM loads
             GROUP BY 1, 2;
         """,
         con=db_engine
     )
+
     # forecast peak and energy
     fore = data_frame_from_xlsx(technology_data_file, 'sales_forecast')
     fore = fore.T.set_index(0).T
@@ -3378,12 +3728,14 @@ def loads():
     # calculate peak and average forecasts
     sls = pd.merge(hist, fore, on='load_zone')
     sls['load_scenario'] = load_scenario
+
     sls['peak_fore'] = sls['underlying forecast (MW)'] + sls['energy efficiency (MW)']
     sls['avg_fore'] = (sls['underlying forecast (GWh)'] + sls['energy efficiency (GWh)'])/8.76
 
     # include another forecast with historical years and with peak and average
     # loads calibrated for 2019
     sls_calib = calibrated_sls(sls)
+    sls_calib['load_scenario'] = load_scenario + '_calib_2019'
     sls = sls.append(sls_calib, ignore_index=True)
 
     # calculate scale and offset for each year
@@ -3405,14 +3757,11 @@ def loads():
             system_load_scale[c] = sls[c].astype(float)
     system_load_scale.set_index(db_columns[:4], inplace=True)
     # store data
-    system_load_scale.to_sql('load_scale', db_engine, if_exists='replace')
-    # Ensure uniqueness and possibly help with queries
-    execute("""
-        ALTER TABLE load_scale
-        ADD PRIMARY KEY (load_zone, year_hist, load_scenario, year_fore);
-    """)
+    system_load_scale.to_sql('load_scale', db_engine, if_exists='append')
 
-    # create another forecast with peak and average loads from 2007,
+
+def flat_2007_load_forecast():
+    # create a forecast with peak and average loads from 2007,
     # carried through to the future
     execute("""
         CREATE TEMPORARY TABLE tsls (LIKE load_scale);
@@ -3456,6 +3805,7 @@ def loads():
         INSERT INTO load_scale SELECT * FROM tsls;
         DROP TABLE tsls;
     """)
+
 
 
 def calibrated_sls_2018(sls):
@@ -3581,7 +3931,6 @@ def calibrated_sls(sls):
     sls_calib['peak_fore'] *= (peak_2019/peak_fcst)
 
     # TODO: merge in the historical records
-    sls_calib['load_scenario'] = load_scenario + '_calib_2019'
     return sls_calib
 
     def loads_exp():

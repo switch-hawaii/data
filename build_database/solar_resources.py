@@ -27,7 +27,7 @@
 
 from __future__ import print_function, division
 from __future__ import absolute_import
-import os, re, sys, struct, ctypes, datetime
+import os, re, sys, struct, ctypes, datetime, time
 from collections import OrderedDict
 import numpy as np
 import pandas as pd
@@ -223,8 +223,8 @@ def module_setup():
     # years = [2007, 2008]
 
     # load System Advisor Model components
-    global ssc, pvwatts5
-    ssc, pvwatts5 = load_sam()
+    global ssc, pvwatts
+    ssc, pvwatts = load_sam()
 
 
 def main():
@@ -268,12 +268,14 @@ def load_sam():
     # note: PySAM (requires Python 3.5+) is available via
     # conda install -c nrel nrel-pysam
     # or pip install nrel-pysam
+    # currently using 1.2.1 and pvwattsv5
+    # could upgrade to 2.1.4 and pvwattsv7
     from PySAM.PySSC import PySSC
     ssc = PySSC()
-    pvwatts5 = ssc.module_create(b"pvwattsv5")
+    pvwatts = ssc.module_create(b"pvwattsv5")
     ssc.module_exec_set_print(0)
 
-    return ssc, pvwatts5
+    return ssc, pvwatts
 
 
 def tracking_pv():
@@ -456,8 +458,6 @@ def distributed_pv():
 
     # restore indexes, final cleanup
     shared_tables.create_indexes('variable_capacity_factors')
-    execute("ALTER TABLE dist_pv_details OWNER TO admin;")
-
 
 def add_distributed_pv(technology, n_tranches):
     # TODO: break up the major sub-sections of the main loop into separate functions
@@ -467,12 +467,16 @@ def add_distributed_pv(technology, n_tranches):
     # factors to the postgresql database (including reading back the project IDs),
     # and use that for distributed PV, utility-scale PV and wind projects
 
-    # technology, n_tranches = 'FlatDistPV', 4
 
     # read roof areas from load_zone_grid_cell.csv
     # treat any NaNs (missing data) as 0.0 coverage
     # See "Resource Assessment/GIS/Rooftop PV/steps to produce rooftop solar files.txt"
     # for steps to create this file.
+    """
+    testing:
+
+    technology, n_tranches = 'FlatDistPV', 4
+    """
     all_cells = pd.read_csv(
         db_path('GIS/General/load_zone_nsrdb_cell.csv'),
         index_col=['load_zone', 'nsrdb_id']
@@ -481,6 +485,7 @@ def add_distributed_pv(technology, n_tranches):
     # calculate hourly capacity factor for all dist pv configurations
     # for each cell in each load zone
     print("Calculating hourly capacity factor for all {} configurations (abt. 1-3 mins).".format(technology))
+    next_alert = time.time() + 60
     for lz in load_zones:
         # lz = 'Oahu'
         lz_cells = all_cells.loc[lz, :]
@@ -502,41 +507,48 @@ def add_distributed_pv(technology, n_tranches):
                 cap_factors.fill(np.nan)
             capacities[cell_n, :] = cell_capacities
             cap_factors[cell_n, :, :] = cell_cap_factors
+            if time.time() > next_alert or cell_n+1 == len(lz_cells):
+                next_alert = time.time() + 30
+                print(
+                    "Calculated distributed PV capacity factors for {} of {} cells in {} load zone."
+                    .format(cell_n+1, len(lz_cells), lz)
+                )
 
         # reshape into a long list of resources instead of a cell x config matrix
         capacities = capacities.reshape((-1,))
         cap_factors = cap_factors.reshape((-1, cap_factors.shape[2]))
+        # if there are 90 cells in load zone * 3 configurations, then
+        # capacities is now a 270-item vector and cap_factors is 270 x number of timesteps
 
-        # cluster available resources into 20 tranches with similar timing and quality
-        # (we assume the better-suited ones will be developed before the worse ones)
-        # (This could be sped up by using a subsample of the timesteps if needed, but then
-        # the cluster means would have to be calculated afterwards.)
-        # an alternative approach would be to cluster resources based on annual average
-        # capacity factor, but that neglects differences in timing between different
-        # orientations.
-        print(
-            "Performing k-means clustering on {} configurations: initializing centers (abt. 1-3 mins)."
-            .format(technology)
-        )
-        km = KMeans(n_tranches, X=cap_factors, size=capacities)
-        import time
-        start = time.time()
-        km.init_centers()
-        km.__dict__
-        print("init_centers(): {} s".format(time.time()-start))
-        start = time.time()
-        print(
-            "Performing k-means clustering on {} configurations: finding centers (3-6 mins)."
-            .format(technology)
-        )
-        km.find_centers()
-        print("find_centers(): {} s".format(time.time()-start))
-        # now km.mu is a matrix of capacity factors, with one row per cluster
-        # and one column per timestep
-        # and km.cluster_id shows which cluster each resource belongs to
+        # Get timesteps labels (based on lat and lon of last cell in the list).
+        # These may have gaps in years.
+        timesteps = [
+            get_timesteps(nsrdb_file_dict[(cell.nsrdb_lat, cell.nsrdb_lon, year)])
+                for year in years
+        ]
+        # make an index of all timesteps
+        timestep_index = pd.concat(
+            (pd.DataFrame(index=x) for x in timesteps)
+        ).index.sort_values()
 
-        cluster_capacities = np.bincount(km.cluster_id, weights=capacities)
-        cluster_cap_factors = km.mu.T
+        # send cell capacities and cap factors to use for clustering, receive
+        # weights of each cell to apply to each cluster;
+        # Weights have one row per cluster, one column per cell, with a 1 showing
+        # which cluster each cell belongs in.
+        cell_cluster_weights = get_cluster_weights(
+            cell_capacities=capacities,
+            cell_cap_factors=cap_factors[:, (timestep_index.year >= 2007) & (timestep_index.year <= 2008)],
+            n_clusters=n_tranches
+        )
+
+        # use weights to calculate capacity and capacity factors for each cluster
+        cluster_capacities = np.dot(cell_cluster_weights, capacities)
+        cell_output = np.multiply(capacities[:, np.newaxis], cap_factors) # cells x hours
+        cluster_output = np.dot(cell_cluster_weights, cell_output)        # clusters x hours
+        cluster_cap_factors = np.divide(
+            cluster_output,
+            cluster_capacities[:, np.newaxis]
+        )  # clusters x hours
 
         # PROJECT TABLE
 
@@ -559,37 +571,57 @@ def add_distributed_pv(technology, n_tranches):
         # VARIABLE_CAPACITY_FACTORS TABLE
 
         print("Linking capacity factor table with database records.")
-        # get timesteps for each year (based on lat and lon of last cell in the list)
-        timesteps = [
-            get_timesteps(nsrdb_file_dict[(cell.nsrdb_lat, cell.nsrdb_lon, year)])
-                for year in years
-        ]
-        # make an index of all timesteps
-        timestep_index = pd.concat(
-            (pd.DataFrame(index=x) for x in timesteps)
-        ).index.sort_values()
 
         # make an index of all site_ids
         # TODO: change this code and project_df code to zero-fill site numbers up to 2 digits
         # (enough to cover the number of tranches in each zone)
         site_ids = [
             '_'.join([load_zone, technology, str(i)])
-                for i in range(cluster_cap_factors.shape[1])
+                for i in range(cluster_cap_factors.shape[0])
         ]
 
         # multiindex of load_zone, technology, site, orientation
         proj_index = pd.MultiIndex.from_product([
             [load_zone], [technology], site_ids, ['na']
         ])
+        # proj_index.to_list()
 
-        # make a single dataframe to hold all the data
+        # make a single dataframe to hold all the data (hours x clusters)
         cap_factor_df = pd.DataFrame(
-            cluster_cap_factors,
+            cluster_cap_factors.T,
             index=timestep_index,
             columns=proj_index,
         )
+        # name the index levels
         cap_factor_df.columns.names = ['load_zone', 'technology', 'site', 'orientation']
         cap_factor_df.index.names=['date_time']
+
+        # SAM doesn't currently provide data for leap days, so we fill in with
+        # averages from 3 days on either side
+        leap_years = set(y for y in cap_factor_df.index.year if y % 4 == 0)
+        fill_hours = pd.DatetimeIndex(
+            [
+                datetime.datetime(y, m, d, h, 0, 0)
+                for y in leap_years
+                for (m, d) in [(2, 26), (2, 27), (2, 28), (3, 1), (3, 2), (3, 3)]
+                for h in range(24)
+            ],
+            tz=cap_factor_df.index.tz
+        )
+        # remove any that are already in the index
+        fill_hours = fill_hours.difference(cap_factor_df.index)
+
+        fill_data = cap_factor_df.loc[fill_hours, :]
+        fill_mean = fill_data.groupby([fill_data.index.year, fill_data.index.hour]).mean()
+        fill_mean.index = pd.DatetimeIndex(
+            [datetime.datetime(y, 2, 29, h) for y, h in fill_mean.index.to_list()],
+            tz=cap_factor_df.index.tz
+        )
+        # drop any fill dates that are already in the data frame
+        fill_mean = fill_mean.reindex(index=fill_mean.index.difference(cap_factor_df.index))
+        cap_factor_df = cap_factor_df.append(fill_mean).sort_index()
+        cap_factor_df.loc['2012-02-29', :]
+        cap_factor_df.index.names=['date_time'] # name got dropped during append
 
         # convert to database orientation, with natural order for indexes,
         # but also keep as a DataFrame
@@ -638,44 +670,131 @@ def add_distributed_pv(technology, n_tranches):
 
         # DIST_PV_DETAILS TABLE (optional)
 
-        print("Saving {} cluster data to database.".format(technology))
-        # store cluster details for later reference
-        # would be interesting to see mean and stdev of lat, lon,
-        # cap factor, azimuth, tilt for each cluster, so we can describe them.
+        # print("Saving {} cluster data to database.".format(technology))
+        # # store cluster details for later reference
+        # # would be interesting to see mean and stdev of lat, lon,
+        # # cap factor, azimuth, tilt for each cluster, so we can describe them.
+        #
+        # # use descriptive data for each cell and each configuration as
+        # # row and column indexes (will later be saved along with data)
+        # rows = pd.MultiIndex.from_arrays(
+        #     lz_cells[col] for col in ['nsrdb_lat', 'nsrdb_lon']
+        # )
+        # cols = pd.MultiIndex.from_arrays(
+        #     dist_pv_configs.loc[technology, col].astype(str)
+        #     for col in dist_pv_configs.columns
+        # )
+        # data = {
+        #     'capacity_mw': capacities.reshape((len(lz_cells), -1)),
+        #     'tranche': (
+        #         'Oahu_'
+        #         + technology + '_'
+        #         + km.cluster_id.astype(str).astype(np.object)
+        #     ).reshape((len(lz_cells), -1))
+        # }
+        # key, vals = list(data.items())[0]
+        # dist_pv_details = pd.concat(
+        #     [
+        #         pd.DataFrame(vals, index=rows, columns=cols).stack(cols.names).to_frame(name=key)
+        #         for key, vals in data.items()
+        #     ],
+        #     axis=1
+        # ).reset_index()
+        # dist_pv_details.insert(0, 'technology', technology)
+        # dist_pv_details.insert(0, 'load_zone', load_zone)
+        #
+        # # store in postgresql database
+        # dist_pv_details.to_sql('dist_pv_details', db_engine, if_exists='append')
 
-        # use descriptive data for each cell and each configuration as
-        # row and column indexes (will later be saved along with data)
-        rows = pd.MultiIndex.from_arrays(
-            lz_cells[col] for col in ['nsrdb_lat', 'nsrdb_lon']
+
+import hashlib
+def get_cluster_weights(cell_capacities, cell_cap_factors, n_clusters):
+    """
+    receive:
+    cell_capacities (vector, weights to use for each cell)
+    cap_factors (one row per cell, one column per time step used for clustering)
+    n_tranches (number of tranches to create)
+
+    return:
+    cell_cluster_weights (one row per cluster, one column per cell, showing
+      fraction of each cell to include in each cluster)
+
+    cluster available resources into specified number of tranches with
+    similar timing and quality
+    (we assume the better-suited ones will be developed before the worse ones).
+    Return capacity in each cluster and hourly capacity factor for each cluster.
+    This could be sped up by using a subsample of the timesteps if needed.
+    , but then
+    the cluster means would have to be calculated afterwards.)
+    an alternative approach would be to cluster resources based on annual average
+    capacity factor, but that neglects differences in timing between different
+    orientations.
+
+    use cached value if previously called for these particular capacities and cap_factors
+
+    testing:
+    np.save('cell_capacities.npy', cell_capacities)
+    np.save('cell_cap_factors.npy', cell_cap_factors)
+    cell_capacities = np.load('cell_capacities.npy')
+    cell_cap_factors = np.load('cell_cap_factors.npy')
+    n_clusters = 4
+    """
+    # return cached values if available
+    cluster_definition = [
+        'weighted_k_means'.encode(),
+        cell_capacities.copy(),
+        cell_cap_factors.copy(),  # have to copy to avoid non-contiguous errors
+        str(n_clusters).encode()
+    ]
+    h = hashlib.sha1()
+    for o in cluster_definition:
+        h.update(o)
+    cache_file = db_path(nsrdb_dir + '/cluster_cache_{}.npy'.format(h.hexdigest()))
+
+    if os.path.exists(cache_file):
+        print('Using cached cluster weights {}.'.format(cache_file))
+        cell_cluster_weights = np.load(cache_file, allow_pickle=False)
+    else:
+        print('Calculating new cluster weights via k-means; will cache in {}.'.format(cache_file))
+
+        # perform k-means clustering
+        km = KMeans(n_clusters, X=cell_cap_factors, size=cell_capacities)
+        km.init_centers()
+        km.find_centers()
+
+        # km.cluster_id shows which cluster each resource belongs to
+        # km.mu is a matrix of capacity factors, with one row per cluster and one
+        # column per timestep.
+        # In theory we could just use the means for the cells from km (km.mu.T),
+        # but that wouldn't allow us to reuse the clustering when rebuilding the
+        # tables (e.g., to process different date ranges or to rebuild the database)
+        # and it would require us to use the full timeseries for k-means instead
+        # of just a relevant subset.
+        cell_cluster_weights = np.zeros((n_clusters, len(cell_capacities)))
+        cell_cluster_weights[km.cluster_id, np.arange(len(km.cluster_id))] = 1
+
+        """
+        # verify these produce the right capacities and production
+        cluster_capacities = np.dot(cell_cluster_weights, cell_capacities)
+        cell_output = np.multiply(cell_capacities[:, np.newaxis], cell_cap_factors)
+        cluster_output = np.dot(cell_cluster_weights, cell_output)
+        cluster_cap_factors = np.divide(
+            cluster_output,
+            cluster_capacities[:, np.newaxis]
         )
-        cols = pd.MultiIndex.from_arrays(
-            dist_pv_configs.loc[technology, col].astype(str)
-            for col in dist_pv_configs.columns
+        (
+            np.abs(np.bincount(km.cluster_id, weights=cell_capacities) - cluster_capacities).max(),
+            np.abs(km.mu - cluster_cap_factors).max()
         )
-        data = {
-            'capacity_mw': capacities.reshape((len(lz_cells), -1)),
-            'tranche': (
-                'Oahu_'
-                + technology + '_'
-                + km.cluster_id.astype(str).astype(np.object)
-            ).reshape((len(lz_cells), -1))
-        }
-        key, vals = list(data.items())[0]
-        dist_pv_details = pd.concat(
-            [
-                pd.DataFrame(vals, index=rows, columns=cols).stack(cols.names).to_frame(name=key)
-                for key, vals in data.items()
-            ],
-            axis=1
-        ).reset_index()
-        dist_pv_details.insert(0, 'technology', technology)
-        dist_pv_details.insert(0, 'load_zone', load_zone)
+        """
 
-        # store in postgresql database
-        dist_pv_details.to_sql('dist_pv_details', db_engine, if_exists='append')
-
+    # cache weights (this may be a re-save, which allows users to see the latest
+    # time a cache file was used, so they can delete obsolete ones)
+    np.save(cache_file, cell_cluster_weights, allow_pickle=False)
+    return cell_cluster_weights
 
 def get_cap_factors(file, settings):
+    # file, settings = nsrdb_file_dict[21.25, -158.26, 2008], dist_pv_configs.loc['SlopedDistPV', :].iloc[1, :]['settings']
     # file, settings = nsrdb_file_dict[lat, lon, year], settings
     dat = ssc.data_create()
 
@@ -697,14 +816,14 @@ def get_cap_factors(file, settings):
     # specify the file holding the solar data
     ssc.data_set_string(dat, b'solar_resource_file', file.encode())
 
-    # run PVWatts5
-    if ssc.module_exec(pvwatts5, dat) == 0:
-        err = b'PVWatts V5 simulation error:\n'
+    # run PVWatts
+    if ssc.module_exec(pvwatts, dat) == 0:
+        err = 'PVWatts simulation error:\n'
         idx = 1
-        msg = ssc.module_log(pvwatts5, 0)
+        msg = ssc.module_log(pvwatts, 0)
         while (msg is not None):
-            err += '\t: {}\n'.format(msg)
-            msg = ssc.module_log(pvwatts5, idx)
+            err += '    : {}\n'.format(msg)
+            msg = ssc.module_log(pvwatts, idx)
             idx += 1
         raise RuntimeError(err.strip())
     else:
@@ -797,11 +916,14 @@ def get_dist_pv_cap_factors(technology, lat, lon, area):
         cap_factors.append(np.concatenate(yearly_cfs))
     return np.array(capacities), np.array(cap_factors)
 
+# cf = get_cap_factors(nsrdb_file_dict[21.25, -158.26, 2008], dist_pv_configs.loc['SlopedDistPV', :].iloc[1, :]['settings'])
+
 def db_path(path):
     """Convert the path specified relative to the database directory into a real path.
     For convenience, this also converts '/' file separators to whatever is appropriate for
     the current operating system."""
     return os.path.join(database_dir, *path.split('/'))
+
 def round_coord(coord):
     """convert lat or lon from whatever form it's currently in to a standard form (2-digit rounded float)
     this ensures stable matching in dictionaries, indexes, etc."""
