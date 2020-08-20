@@ -28,14 +28,14 @@ These are some of the important input files used to create the data warehouse:
 
 - `Generator Info/Existing Plant Data.xlsx`
   - data describing the capabilities of existing power plants
-- `Generator Info/PSIP 2016-12 ATB 2019 generator data.xlsx`
+- `Generator Info/PSIP 2016-12 ATB 2020 generator data.xlsx`
   - data describing new renewable projects that could be developed, as well as
     HECO sales forecasts
   - note that HECO DER forecasts and near-term construction forecasts are
-    shown in `switch_model.hawaii.heco_outlook_2020_06` and
-    `switch_model.hawaii.heco_outlook_2020_06` in the main Switch repository
+    shown in `switch_model.hawaii.heco_outlook_2020_08` and
+    `switch_model.hawaii.heco_outlook_2020_08` in the main Switch repository
 - `EV Adoption/IGP adoption forecast 2020-05-13.xlsx`
-  - EV adoption projections based on Hawaiian Electric IGP docket, used used for
+  - EV adoption projections based on Hawaiian Electric IGP docket, used for
     Ulupono scenarios in the PBR docket in 2020
 - `EV Adoption/EV projections with buses.xlsx`
   - EV adoption projections used for academic studies with Switch
