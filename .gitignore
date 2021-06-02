@@ -5,8 +5,11 @@
 ~$*.xlsx
 Archive/
 *.bak
+HECO Plans/
+Resource Assessment/GIS/Rooftop PV/raw*/
 Resource Assessment/NSRDB Hourly Irradiance Data/*
 !Resource Assessment/NSRDB Hourly Irradiance Data/download_nsrdb_data.py
+!Resource Assessment/NSRDB Hourly Irradiance Data/cluster_cache*
 EV Adoption/NHTS 2017/*
 !EV Adoption/NHTS 2017/data source.txt
 FERC Form 714 Database/*
