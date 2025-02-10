@@ -15,13 +15,14 @@ import numpy as np
 import pandas as pd
 import sklearn.cluster, sklearn.metrics
 import sqlalchemy
-import shared_tables, solar_resources
+import shared_tables, solar_resources, util
 from util import (
     execute,
     executemany,
     pg_host,
     switch_db,
     copy_dataframe_to_table,
+    time_zone,
 )
 
 try:
@@ -1922,6 +1923,7 @@ def ev_adoption():
             ev_scenario varchar(40),
             ev_share float,
             ice_miles_per_gallon float,
+            ice_fuel varchar(20),
             ev_miles_per_kwh float,
             ev_extra_cost_per_vehicle_year float,
             n_all_vehicles float,
@@ -1946,10 +1948,16 @@ def read_simple_ev_adoption_file(file_name):
     )
 
     n_rows = len(ev_adoption_curves["Year"])
+    # TODO: move these to the xlsx files
     ev_adoption_curves["load zone"] = ("Oahu",) * n_rows
+    ev_adoption_curves["ICE fuel"] = ("Motor_Gasoline",) * n_rows
+
+    # note: columns below are inserted in into the ev_adoption table based
+    # on order, not name, so order should match ev_adoption()
     initial_cols = ["load zone", "Year"]
     final_cols = [
         "ICE miles per gallon",
+        "ICE fuel",
         "EV miles per kWh",
         "EV extra cost per vehicle per year",
         "number of vehicles",
