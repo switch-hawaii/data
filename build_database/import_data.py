@@ -1,20 +1,19 @@
 #!/usr/bin/env python
 
-"""construct postgresql backend database for SWITCH-Hawaii.
-Data is pulled into this database from various sources (Excel files,
-GIS results, NSRDB/OWITS data files), and then switch_mod.hawaii.scenario_data
-can be used to construct any scenario using the accumulated data.
-"""
+# construct postgresql backend database for SWITCH-Hawaii.
+# Data is pulled into this database from various sources (Excel files,
+# GIS results, NSRDB/OWITS data files), and then switch_mod.hawaii.scenario_data
+# can be used to construct any scenario using the accumulated data.
 
 from __future__ import division, print_function, absolute_import
 
-import sys, csv, datetime, os, collections, math, textwrap
+import sys, csv, datetime, os, math, textwrap
 import numpy as np
 import pandas as pd
 import sklearn.cluster, sklearn.metrics
 import sqlalchemy
 import shared_tables, solar_resources, util
-from util import execute, executemany, pg_host, switch_db, copy_dataframe_to_table
+from util import execute, executemany, pg_host, switch_db, copy_dataframe_to_table, time_zone
 
 try:
     import openpyxl
@@ -24,6 +23,11 @@ except ImportError:
     raise
 
 db_engine = sqlalchemy.create_engine('postgresql://' + pg_host + '/' + switch_db, echo=True)
+# with db_engine.connect() as con:
+#     # set time zone for server-side calculations like date truncation
+#     # (doesn't actually work, because sqlalchemy seems to make a new connection for every query, resetting the time zone)
+#     con.execute('SET TIME ZONE %s;', (time_zone,))
+
 
 # raise SettingWithCopyError instead of SettingWithCopyWarning
 pd.set_option('mode.chained_assignment', 'raise')
@@ -79,7 +83,7 @@ def main():
     # and fill them with data on all available renewable energy projects (new
     # and existing). These show what is available physically, regardless of
     # technology scenario. These shouldn't be re-run often, because they
-    # re-cluster the solar (and wind?) sites each time.
+    # re-cluster the rooftop solar sites each time.
     # If re-running, you should delete or rename project and variable_capacity_factors tables
     # at this point, to avoid carrying over old records. (gen_build_predetermined,
     # generator_info and gen_build_costs will all be rebuilt from
@@ -88,33 +92,65 @@ def main():
     # execute("drop table variable_capacity_factors;")
     # or:
     # shared_tables.drop_indexes("projects") # index names must be unique across tables(!)
-    # execute("alter table projects rename to project_2019_10_09;")
+    # execute("alter table projects rename to projects_2021_06_01;")
     # shared_tables.drop_indexes("variable_capacity_factors") # index names must be unique across tables(!)
-    # execute("alter table variable_capacity_factors rename to variable_capacity_factors_2019_10_09;")
+    # execute("alter table variable_capacity_factors rename to variable_capacity_factors_2021_06_01;")
     solar_resources.tracking_pv()
     solar_resources.distributed_pv()
     onshore_wind()
     offshore_wind()
+    renewable_supply_curve()
 
-    # generator info functions create or recreate tables with descriptions of all
-    # renewable and fossil technologies (generator_info,
-    # gen_build_costs, etc.). They also add records for fossil projects
-    # and existing renewable projects to the projects table created earlier.
-    # This can be re-run without re-running the renewable functions, because
-    # it deletes all non-renewable records from the projects table and leaves
-    # the renewable records.
+    # generator info functions create or recreate tables with descriptions of
+    # all renewable and fossil technologies (generator_info, gen_build_costs,
+    # etc.). They also add records for fossil projects and existing renewable
+    # projects to the projects table created earlier. This can be re-run without
+    # re-running the renewable functions, because it deletes all non-renewable
+    # records from the projects table and leaves the renewable records.
 
     # TODO: estimate costs for existing projects (including new-buildable) in
     # Existing Plant Data.xlsx and then create single records for these with
     # tech_scenario = "all" or "existing" in generator_info and gen_build_costs
     # Then don't create records for these when doing new generators. And
-    # reference the correct tech_scenario when retrieving DER production in loads().
+    # reference the correct tech_scenario when retrieving DER production in
+    # loads().
+    # shared_tables.drop_indexes("projects") # index names must be unique across tables(!)
+    # execute("alter table projects rename to project_2021_06_01;")
+    # shared_tables.drop_indexes("variable_capacity_factors") # index names must be unique across tables(!)
+    # execute("alter table variable_capacity_factors rename to variable_capacity_factors_2020_06_01;")
     generator_info()
+    # note: this overallocates existing projects to some tiny existing projects, which
+    # throws an error just as generator_info() finishes; for now we manually update these
+    # in the database
+    """
+             SELECT
+                p.project_id, load_zone, technology, site, orientation,
+                gen_capacity_limit_mw,
+                sum(gen_predetermined_cap) as gen_predetermined_cap,
+                latitude, longitude
+            FROM projects p JOIN gen_build_predetermined USING (project_id)
+            GROUP BY 1, 2, 3, 4, 5, 6
+            HAVING sum(gen_predetermined_cap) > gen_capacity_limit_mw;
+
+            select project_id, technology, site, gen_capacity_limit_mw, latitude, longitude from projects where latitude between 21.3 and 21.4 and longitude between -158.12 and -158.02;
+            select * from gen_build_predetermined where project_id in (23, 25);
+            update gen_build_predetermined set project_id = 25 where project_id = 23;
+
+            select project_id, technology, site, gen_capacity_limit_mw, latitude, longitude from projects where latitude between 21.37 and 21.47 and longitude between -158.2 and -158.1;
+            select * from gen_build_predetermined where project_id in (13, 14, 15);
+            update gen_build_predetermined set project_id = 13 where project_id = 15;
+
+            -- re-run first query
+            -- note: we get quite a few projects matched to B, C or steep land that maybe should have
+            -- been matched to X or flatter land.
+    """
 
     # add interconnect costs to projects table; these aren't calculated earlier
     calculate_interconnect_costs()
 
-    # depends on production estimates from existing PV
+    # uses production estimates from existing PV to gross-up net loads,
+    # so it must run after distributed PV import script
+    # execute("ALTER TABLE loads RENAME TO loads_2021_06_01;")
     loads()
 
     # various timeseries
@@ -131,6 +167,8 @@ def main():
     short_slice_timeseries()
     mini_timeseries()
 
+    # next lines aren't needed because there's a trigger to change the owner
+    # automatically for all new tables. See shared_tables.create_database().
     # curr_user = next(execute('select current_user;'))[0]
     # execute("REASSIGN OWNED BY {} TO admin;".format(curr_user))
 
@@ -205,11 +243,12 @@ def data_frame_from_xlsx(xlsx_file, named_range):
 
 def get_named_cell_from_xlsx(xlsx_file, named_range):
     region = get_named_region(xlsx_file, named_range)
-    if isinstance(region, collections.Iterable):
+    if hasattr(region, "__getitem__"):
         raise ValueError(
             'Range "{}" in workbook "{}" does not refer to an individual cell.'.format(
                 named_range, xlsx_file))
-    return region.value
+    else:
+        return region.value
 
 #########################
 # rps timeseries (reusing version from before the server crashed)
@@ -667,7 +706,7 @@ def long_slice_timeseries():
         .rename(columns={"base_year": "year", "month_of_year": "month", "day_of_month": "day"})
     )
     time_sample_weights = (
-        study_dates.groupby(('time_sample', 'period')).size()
+        study_dates.groupby(['time_sample', 'period']).size()
         .reset_index().rename(columns={0: 'n_days'})
     )
     study_dates = study_dates.merge(time_sample_weights, on=['time_sample', 'period'])
@@ -885,8 +924,8 @@ def make_short_slice_timeseries(days_per_sample, period_years, period_lengths, t
 # 2008-12-31: wind data go up to the end of 2008 in UTC timezone, which is
 # 10 hours before the end of 2008 in HST.
 sql_date_filter = """
-    date_trunc('day', date_time) between '2007-01-01' and '2008-12-31'
-    and date_trunc('day', date_time) not in
+    date_trunc('day', date_time at time zone 'HST') between '2007-01-01' and '2008-12-31'
+    and date_trunc('day', date_time at time zone 'HST') not in
         ('2008-02-29', '2008-12-26', '2008-12-27', '2008-12-31')
 """
 
@@ -1186,7 +1225,9 @@ def k_means_timeseries_daily_avg():
                         .format("Re-created" if dates else "Created", time_sample, time_sample)
                     )
 
-
+# period_years = period_set['period_years']
+# period_length = period_set['period_length']
+# n_hard_days = None
 def make_k_means_timeseries(vectors, n_days, period_years, period_length, time_sample, dates=None, n_hard_days=None):
     if dates:
         center_dates = pd.to_datetime(dates)
@@ -1769,7 +1810,7 @@ def ev_hourly_charge_profiles():
         data_dir('EV Adoption', 'EoT Roadmap Nonmanaged Charging in 2030.xlsx'),
         sheet_name='Oahu Residential',
         usecols='D'
-    )
+    ).dropna()   # newer versions of pandas pickup 26 empty rows at the end
     heco_profile['hour_of_day'] = list(range(24))*365
     heco_profile = heco_profile.groupby('hour_of_day').mean().reset_index()
     heco_profile['charge_weight'] = heco_profile['2030 (MW)'] / heco_profile['2030 (MW)'].mean()
@@ -1872,7 +1913,7 @@ def ev_adoption_advanced():
     # add dummy records for motorcycles (mpg from afdc_alternative_2015)
     motorcycle_mpg = mpg[mpg['epa_type']=='Car'].copy()
     motorcycle_mpg[['epa_type', 'mpg']] = ['Motorcycle', 43.54]
-    mpg = mpg.append(motorcycle_mpg).reset_index(drop=True)
+    mpg = pd.concat([mpg, motorcycle_mpg]).reset_index(drop=True)
 
     # cross-reference NHTS vehicle type to EPA vehicle type
     # (based on https://nhts.ornl.gov/assets/codebook.pdf)
@@ -2139,7 +2180,7 @@ def ev_adoption_advanced():
         energy_adjustment=1.0
     )).reindex(columns=cols)
 
-    w = w.append(w2).reset_index(drop=True).copy()
+    w = pd.concat([w, w2]).reset_index(drop=True).copy()
     # assign vehicle ID
     w['veh_id'] = w.index
     # calculate total power used by each class of vehicle during charging, including adjustments
@@ -2148,7 +2189,15 @@ def ev_adoption_advanced():
     )
     # w[['vehicle_type', 'energy_adjustment', 'n_vehicles', 'charger_rating', 'days_per_charge', 'charging_mw']]
 
-
+    # save hourly charging data for use by other models
+    # For each slice of a 100% EV fleet for Oahu, for each timestep, this
+    # shows the fraction of that hour when the vehicles could charge
+    # (chargeable_hours_in_step), the total duration of charge needed
+    # across all timesteps (charge_duration) and the total MW used for
+    # charging at full power.
+    reqs = get_timesteps_table(w, 1).merge(w)
+    reqs.to_csv(data_dir("EV Adoption", "EV_charging_requirements.csv"), index=False)
+    del reqs
 
     ####################################
     # calculate vectors of charging power demand each timestep, for various price vectors
@@ -2805,7 +2854,12 @@ def offshore_wind():
     # Mapping_and_Data/Wind_Planning_Areas.zip)
     locs = np.array([[21.656, -158.572], [21.096, -157.987], [20.969, -157.799]])
     # cells: array with one row per cell, cols are i, j, lat, lon
-    cells = pd.read_csv('http://redr.eng.hawaii.edu:8888/OWITS/E_Georef.csv').values
+
+    # before 10/7/21: owits_root = 'http://redr.eng.hawaii.edu:8888'
+    owits_root = data_dir('Resource Assessment', 'OWITS')
+
+    cells = pd.read_csv(owits_root + '/OWITS/E_Georef.csv').values
+
     cell_lat_lon = cells[:,-2:]
     # this makes one row for each site, one col for each cell, showing distance in degrees**2
     dist2 = ((locs[:,np.newaxis,:] - cell_lat_lon[np.newaxis,:,:])**2).sum(axis=2)
@@ -2825,12 +2879,12 @@ def offshore_wind():
 
     # read 10-min wind speed data for each wind farm site, convert to production,
     # average across hour. Then use average across sites as a single project.
-    print("Retrieving hourly offshore wind data from  http://redr.eng.hawaii.edu (abt. 1 min).")
+    if owits_root.startswith("http"):
+        print("Retrieving hourly offshore wind data from {} (abt. 1 min).".format(owits_root))
     hourly = 0 # will become a series with one row per historical hour
     for i, j, lat, lon in turbine_cells:
         ten_min = pd.read_csv(
-            'http://redr.eng.hawaii.edu:8888/OWITS_DATA/E/{:04g}_{:04g}.HAWAII.E.txt'
-                .format(i, j),
+            owits_root + '/OWITS_DATA/E/{:04g}_{:04g}.HAWAII.E.txt'.format(i, j),
             # from http://redr.eng.hawaii.edu:8888/OWITS/README_OWITS_DATA.TXT
             names=
                 'DATE,TIME,TSFC,PSFC,PCP,Q2M,DSWRF,DLWRF,T10,S10,W10,T50,S50,'
@@ -2884,6 +2938,44 @@ def offshore_wind():
     # the generic connection cost from generator_info (assigned later).
     # That happens to be zero in this case since the connection cost is included in the overnight cost.
 
+
+def renewable_supply_curve():
+    """
+    Save renewable energy supply curve for later graphing.
+    See "<gis_dir>/renewable energy supply curve.xlsx" for final graphs.
+    """
+    supply_curve = pd.read_sql(
+        """
+            select
+                -- consolidate DistPV technologies
+                REPLACE(REPLACE(technology, 'FlatDistPV', 'DistPV'), 'SlopedDistPV', 'DistPV') AS technology,
+                gen_capacity_limit_mw AS max_capacity,
+                SUM(gen_capacity_limit_mw*cap_factor)/sum(gen_capacity_limit_mw) as cap_factor
+            from projects p
+            join variable_capacity_factors c using (project_id)
+            group by p.project_id, 1, 2
+            order by 1, 3 desc;
+        """,
+        db_engine
+    )
+    # add the first step on each part of the supply curve (0 cumulative MW)
+    first_points = supply_curve.groupby('technology')[['cap_factor']].max().reset_index()
+    first_points['max_capacity'] = 0
+    supply_curve = (
+        pd.concat([supply_curve, first_points], axis=0, sort=False)
+        .sort_values(
+            ['technology', 'cap_factor', 'max_capacity'],
+            axis=0, ascending=[True, False, True]
+        )
+    )
+    supply_curve['cumulative_mw'] = supply_curve.groupby('technology')['max_capacity'].cumsum()
+    # put the columns in the right order for plotting
+    supply_curve = supply_curve[['technology', 'cumulative_mw', 'cap_factor']]
+
+    gis_dir = data_dir('Resource Assessment', 'GIS')
+    supply_curve.to_csv(os.path.join(gis_dir, 're_supply_curve.csv'), index=False)
+
+
 def generator_info():
     # note: these must always be run in this sequence, because
     # new_generator_info() drops+creates the generator_info and
@@ -2919,8 +3011,8 @@ def generator_info():
 
 def new_generator_info():
     """
-    Read data from technology_data_file and store it in generator_info and
-    gen_build_costs.
+    Read data from technology_data_file and store it in generator_info,
+    gen_build_costs and projects (cap cost multiplier and adder).
     """
 
     base_years = data_frame_from_xlsx(technology_data_file, 'cost_base_years')
@@ -3057,8 +3149,11 @@ def new_generator_info():
         [tuple(renewable_techs)]
     )
     # insert non-renewable project definitions into projects table
-
     project_info.to_sql('projects', db_engine, if_exists='append')
+
+    # record cost adjustments based on project attributes
+    # (e.g., slope_class or land_class)
+    project_attribute_cost_adjustments()
 
     # add DistBatteries option
     distributed_batteries()
@@ -3081,6 +3176,48 @@ def distributed_batteries():
             del df['project_id']
         df.to_sql(table, db_engine, index=False, if_exists='append')
     print("Added DistBattery technology to database.")
+
+
+def project_attribute_cost_adjustments():
+    # record cost adjustments based on project attributes
+    cost_adjustments = (
+        data_frame_from_xlsx(technology_data_file, 'project_attribute_cost_adjustments')
+        .T.set_index(0).T
+    )
+
+    execute('UPDATE projects SET "cost_offset"=0, cost_multiplier=1')
+    for i, r in cost_adjustments.iterrows():
+        col = str(sqlalchemy.literal_column(r['attribute']).compile(compile_kwargs={"literal_binds": True}))
+        execute(f"""
+            UPDATE projects
+            SET cost_offset = cost_offset + %(offset)s, cost_multiplier = cost_multiplier*%(multiplier)s
+            WHERE {col} = %(value)s
+        """, r)
+
+    # # calculate cost adjustments in SQL form (messy version)
+    # offset = sqlalchemy.literal(0)
+    # multiplier = sqlalchemy.literal(1.0)
+    # for i, r in cost_adjustments.iterrows():
+    #     test = sqlalchemy.sql.literal_column(r['attribute']) == r['value']
+    #     offset += sqlalchemy.case((test, r['offset']), else_=0.0)
+    #     multiplier *= sqlalchemy.case((test, r['multiplier']), else_=1.0)
+    # # haven't quite figured out how to do the next line in sqlalchemy
+    # execute(f"""
+    #     UPDATE projects
+    #     SET
+    #         "offset"={offset.compile(compile_kwargs={"literal_binds": True})},
+    #         multiplier={multiplier.compile(compile_kwargs={"literal_binds": True})};
+    # """)
+    # Below doesn't work for some reason
+    # str(
+    #     sqlalchemy
+    #     .update(
+    #         sqlalchemy.table('projects'),
+    #         values={'offset': offset, 'multiplier': multiplier}
+    #     )
+    # )
+
+
 
 def existing_generator_info():
     """copy data from 'Data/Generator Info/Existing Plant Data.xlsx' into
@@ -3520,10 +3657,11 @@ def get_historical_ev_loads(tz):
         data_dir('EV Adoption', 'EoT Roadmap Nonmanaged Charging in 2030.xlsx'),
         sheet_name='Oahu Residential',
         usecols='D'
-    )
+    ).iloc[:8760, :]  # drop a few dozen NaNs at the end
     # convert to % of annual total
     ev_load_shape = ev_load_shape / ev_load_shape.sum()
-    # ev_load_shape doesn't include leap day, so we have to index by
+    # The Excel file shows month numbers as the hour numbers, so we create a
+    # suitable index from scratch.
     ev_load_shape.index = pd.date_range(
         start=datetime.datetime(2030, 1, 1, 0, 0, 0),
         end=datetime.datetime(2030, 12, 31, 23, 59, 59),
